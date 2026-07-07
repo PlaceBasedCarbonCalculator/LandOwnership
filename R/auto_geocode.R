@@ -1,3 +1,7 @@
+# Daily geocoding run: pick the next batch CSV from OneDrive that has not
+# been geocoded yet, run it through the Bing Locations API and save the
+# results (and failures) as Rds. See also send_for_geocode.R, which does
+# the same for batches stored inside the repo's data folder.
 library(sf)
 library(tmap)
 source("R/bing_api.R")
@@ -12,7 +16,7 @@ path <- "D:/OneDrive - University of Leeds/Data/Land Ownership"
   files_done <- gsub(".Rds","",files_done, fixed = TRUE)
   files_done <- files_done[!grepl("_failed",files_done)]
   
-  message("Doing ",length(files_done)," of ",length(files_todo)," batches")
+  message("Done ",length(files_done)," of ",length(files_todo)," batches")
   
   # Skip any done already
   files_todo <- files_todo[!files_todo %in% files_done]

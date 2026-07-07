@@ -1,3 +1,6 @@
+# Import the raw INSPIRE polygon zips (one per Local Authority), combine
+# them into a single dataset and export as geojson. Superseded by
+# prep_land_registry_alt.R which also cleans the grid-split polygons.
 library(sf)
 library(tmap)
 library(data.table)
@@ -34,12 +37,6 @@ polys2 <- polys2[,c("local_authority","INSPIREID","geometry")]
 
 st_write(polys2,"data/tilegeojson/inspire.geojson")
 
-summary(duplicated(poly$INSPIREID))
-
-
-
-poly <- st_transform(poly, 4326)
-
-
-qtm(poly)
-
+# Scratch checks (note: `poly` is removed at the end of the import loop)
+# summary(duplicated(polys2$INSPIREID))
+# qtm(polys2)

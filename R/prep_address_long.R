@@ -1,3 +1,7 @@
+# Split the long single-postcode freehold addresses (from
+# import_UK_owners.R) into one row per property. Addresses still longer
+# than 90 characters after splitting (mostly chains of flats) are saved
+# separately as too complex.
 library(dplyr)
 library(purrr)
 library(stringr)

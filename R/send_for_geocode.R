@@ -1,4 +1,6 @@
-# Send a file to be geocoded
+# Send the next batch CSV from data/for_geocoding to the Bing geocoder and
+# save results to data/geocoded (see auto_geocode.R for the OneDrive
+# variant used for the daily runs).
 library(sf)
 library(tmap)
 source("R/bing_api.R")

@@ -1,4 +1,6 @@
-# Failed titles
+# Export examples of titles that could not be parsed or geocoded, for
+# review and for sharing with others.
+library(sf)
 
 f1 <- readRDS("data/UK_freehold_nopc_complex.Rds")
 f2 <- readRDS("data/UK_freehold_pc_single_long_complex.Rds")

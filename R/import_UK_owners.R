@@ -1,4 +1,14 @@
-# Parse Land Registry Data
+# Stage 1 of the UK (CCOD) pipeline: read the "UK companies that own
+# property in England and Wales" CSV and split the freehold titles into
+# categories by how hard they are to geocode:
+#   * single postcode, short address  -> data/UK_freehold_pc_single_short.Rds
+#   * single postcode, long address   -> data/UK_freehold_pc_single_long.Rds
+#   * multiple postcodes              -> data/UK_freehold_pc_multi.Rds
+#   * "land" with a postcode          -> data/UK_freehold_pc_land.Rds
+#   * no postcode                     -> data/UK_freehold_nopc.Rds
+#   * "land" without a postcode       -> data/UK_freehold_nopc_land.Rds
+# The short single-postcode addresses are also split into one row per
+# property (e.g. "10-14 Example Street" becomes three rows).
 library(readr)
 library(purrr)
 

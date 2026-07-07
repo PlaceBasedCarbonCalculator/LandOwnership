@@ -1,3 +1,6 @@
+# Explore common words in OSM road names (see also prep_town_regex.R).
+# Strips the common road-type suffixes (Road, Street, ...) to find the
+# distinctive name stems.
 roads = read.csv("data/osm_unique_road_names.csv")
 roads = roads$name
 

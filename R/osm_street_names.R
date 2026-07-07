@@ -1,4 +1,8 @@
+# Extract unique road and place names for Great Britain from an
+# OpenStreetMap extract, used to help identify road/place names within
+# Land Registry address strings.
 library(osmextract)
+library(sf)
 path = "D:/OneDrive - University of Leeds/Data/opentripplanner/graphs/great-britain-NTEM/great-britain-latest.osm.pbf"
 
 highway = oe_read(path,

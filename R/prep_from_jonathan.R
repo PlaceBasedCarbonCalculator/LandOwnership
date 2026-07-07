@@ -1,4 +1,6 @@
-#
+# Convert Jonathan's enhanced (pre-parsed) version of the missing overseas
+# owners back into the addressLine/adminDistrict/postalCode format used by
+# the Bing geocoding batches.
 
 # miss_uk <- read.csv("data/UK_Owners_Missing.csv")
 # jon_uk <- read.csv("data/from_jonathan/malcom_enhanced/malcom_uk_enhanced.csv")

@@ -1,3 +1,5 @@
+# One-off extract of the good/medium geocoded points within the London
+# boroughs, for sharing.
 library(sf)
 library(dplyr)
 library(tmap)

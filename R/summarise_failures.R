@@ -1,3 +1,6 @@
+# Export the titles that never received a good/medium geocode
+# (data/UK_Owners_Missing.csv and data/Overseas_Owners_Missing.csv) so the
+# failures can be reviewed or handed to someone else to work on.
 library(sf)
 library(dplyr)
 library(tmap)

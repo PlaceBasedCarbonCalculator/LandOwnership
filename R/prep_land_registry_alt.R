@@ -1,3 +1,7 @@
+# Import the INSPIRE polygon zips (one per Local Authority), clean them by
+# merging polygons that have been artificially split along the 500m British
+# National Grid lines of old paper maps, then export cleaned geojson for
+# building vector tiles. This is the improved version of prep_land_registry.R.
 library(sf)
 library(tmap)
 library(data.table)
@@ -119,9 +123,9 @@ for(i in 1:length(zips)){
   poly_new$area <- as.numeric(st_area(poly_new))
   poly_new$perimiter <- as.numeric(lwgeom::st_perimeter(poly_new))
   
-  # Final Pass for any perfect squares
-  poly_squares <- poly_new[poly_new$area == 250000,]
-  poly_squares <- poly_new[poly_new$perimiter == 2000,]
+  # Final pass for any perfect 500m x 500m grid squares
+  # (area 250,000 m2 AND perimeter 2,000 m)
+  poly_squares <- poly_new[poly_new$area == 250000 & poly_new$perimiter == 2000,]
   
   if(nrow(poly_squares) > 0){
     poly_new <- poly_new[!poly_new$INSPIREID %in% poly_squares$INSPIREID,]

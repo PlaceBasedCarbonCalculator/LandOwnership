@@ -1,5 +1,15 @@
+# Functions for geocoding with the Bing Maps REST services.
+# Two routes are supported:
+#  * The Spatial Data Services batch dataflow (bing_geocode, ..._status,
+#    ..._download) which geocodes an uploaded CSV, and
+#  * The Locations API (bing_geocode_single etc.) which geocodes one
+#    address per request; bing_geocode_batch() loops this over a data frame.
+# API keys are read from the environment variables Bing_master_key (data
+# source management) and Bing_query_key (geocoding queries).
+
+# Delete a data source previously uploaded to the Bing Spatial Data Services
 bing_delete_data <- function(dataSourceName, accessId, key = Sys.getenv("Bing_master_key")){
-  
+
   url <- paste0("http://spatial.virtualearth.net/REST/v1/data/",
                accessId,
                "/",
@@ -7,11 +17,13 @@ bing_delete_data <- function(dataSourceName, accessId, key = Sys.getenv("Bing_ma
                "?",
                "key=",
                key)
-  res <- httr::GET(url)
+  # Deletion requires an HTTP DELETE request (a GET just queries the source)
+  res <- httr::DELETE(url)
   content <- httr::content(res, type = "text")
-
+  return(content)
 }
 
+# List the names of data sources uploaded to the Bing Spatial Data Services
 bing_get_data_sources <- function(key = Sys.getenv("Bing_master_key")){
   url <- paste0("http://spatial.virtualearth.net/REST/v1/data?key=",
                 key)
@@ -22,6 +34,8 @@ bing_get_data_sources <- function(key = Sys.getenv("Bing_master_key")){
   return(content$service$workspace$title)
 }
 
+# Upload a CSV to the Bing Spatial Data Services as a new/updated data
+# source. If dataSourceName is NULL it is derived from the file name.
 bing_upload_data <- function(path,
                              dataSourceName = NULL, 
                              input = "csv",
@@ -61,6 +75,9 @@ bing_upload_data <- function(path,
   return(content)
 }
 
+# Submit a CSV of addresses as a batch geocode dataflow job.
+# Returns the job info (including $id) on success, used by
+# bing_geocode_status() and bing_geocode_download().
 bing_geocode <- function(path, query_key = Sys.getenv("Bing_query_key")){
   
   checkmate::assert_file_exists(path)
@@ -83,6 +100,7 @@ bing_geocode <- function(path, query_key = Sys.getenv("Bing_query_key")){
 }
 
 
+# Check the status of a batch geocode job submitted with bing_geocode()
 bing_geocode_status <- function(jobID, query_key = Sys.getenv("Bing_query_key")){
   
   url <- paste0("http://spatial.virtualearth.net/REST/v1/Dataflows/Geocode/",
@@ -105,6 +123,8 @@ bing_geocode_status <- function(jobID, query_key = Sys.getenv("Bing_query_key"))
 
 
 
+# Download the successful results of a completed batch geocode job as a
+# data frame
 bing_geocode_download <- function(jobID, query_key = Sys.getenv("Bing_query_key")){
   
   url <- paste0("https://spatial.virtualearth.net/REST/v1/dataflows/Geocode/",
@@ -142,6 +162,7 @@ bing_geocode_download <- function(jobID, query_key = Sys.getenv("Bing_query_key"
 }
 
 
+# Convert a geocode results data frame to an sf points object (WGS84)
 bing_to_sf <- function(tab){
   tab <- sf::st_as_sf(tab, coords = c("Longitude","Latitude"), crs = 4326)
   tab$TraceId <- NULL
@@ -149,6 +170,8 @@ bing_to_sf <- function(tab){
 }
 
 
+# Build a URL from a base and a named list of query parameters (NULL
+# entries are dropped; values are URL-encoded)
 build_url <- function(routerUrl, query) {
   secs <- unlist(query, use.names = TRUE)
   secs <- sapply(secs, utils::URLencode, reserved = TRUE)
@@ -159,6 +182,10 @@ build_url <- function(routerUrl, query) {
 }
 
 
+# Geocode a single address with the Bing Maps Locations API.
+# Returns a data frame of candidate matches (one row per result) with
+# coordinates, confidence, entityType and matchCodes, or a single row of
+# NAs if the request failed.
 bing_geocode_single <- function(countryRegion = "GB",
                                adminDistrict = NULL,
                                postalCode = NULL, 
@@ -290,6 +317,8 @@ bing_geocode_single <- function(countryRegion = "GB",
   
 }
 
+# Error-tolerant wrapper around bing_geocode_single(); returns NULL on
+# error instead of stopping, so a batch run is not aborted by one failure
 bing_geocode_single_try <- function(countryRegion = "GB",
                                     adminDistrict = NULL,
                                     postalCode = NULL, 
@@ -323,6 +352,10 @@ bing_geocode_single_try <- function(countryRegion = "GB",
 }
 
 
+# Geocode a data frame of addresses one row at a time with a progress bar.
+# `dat` must contain at least 4 of the columns countryRegion, adminDistrict,
+# postalCode, locality, addressLine, includeNeighborhood, include,
+# maxResults, key. Returns dat joined to the geocode results.
 bing_geocode_batch <- function(dat){
   
   vars <- c("countryRegion","adminDistrict","postalCode","locality",
@@ -343,6 +376,7 @@ bing_geocode_batch <- function(dat){
   
 }
 
+# purrr::pmap_dfr() with a progress bar
 map_df_progress <- function(.x, .f, ..., .id = NULL) {
   .f <- purrr::as_mapper(.f, ...)
   pb <- progress::progress_bar$new(total = nrow(.x), force = TRUE)

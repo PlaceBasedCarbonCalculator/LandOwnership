@@ -1,3 +1,7 @@
+# Build Local Authority boundaries (data/la_bounds.geojson) with names
+# matched to the AdminDistrict names used in the Land Registry data.
+# Includes merging the old Northamptonshire districts into the North/West
+# Northamptonshire unitaries. Used to sanity-check geocoded points.
 library(sf)
 library(tmap)
 library(dplyr)

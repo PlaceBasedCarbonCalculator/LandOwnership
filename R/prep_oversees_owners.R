@@ -1,4 +1,7 @@
-# Parse Land Registry Data
+# Prepare the overseas company ownership data (OCOD) for geocoding:
+# split multi-postcode titles, apply the standard text cleaning
+# (text_cleaning.R) and split into one row per property.
+# Saves data/Overseas_split.Rds.
 library(readr)
 library(purrr)
 library(dplyr)

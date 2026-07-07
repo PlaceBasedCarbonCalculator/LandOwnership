@@ -1,4 +1,10 @@
-#Read in Bing Resutls and parse
+# Combine all the geocoded batches and grade the results by quality:
+#   good    - entityType "Address", confidence "High", in the expected LA
+#   medium  - in the expected LA but lower confidence / not an address
+#   low     - confidence "Low"
+#   wrongla - point falls in a different Local Authority than expected
+#   nola    - point falls outside England & Wales
+# Saves the graded sets to data/bing_final/.
 library(dplyr)
 library(sf)
 library(tmap)

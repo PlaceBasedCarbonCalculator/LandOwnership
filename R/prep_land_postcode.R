@@ -1,3 +1,8 @@
+# Clean the "land with a postcode" freehold titles (from
+# import_UK_owners.R): split up multi-postcode titles, normalise compass
+# directions and spelling, remove known boilerplate phrases
+# (data/common_land_terms.xlsx plus the list below), then split into one
+# row per property. Saves data/UK_freehold_pc_land_simple.Rds.
 library(purrr)
 library(combinat)
 library(dplyr)

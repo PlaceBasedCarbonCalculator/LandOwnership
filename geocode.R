@@ -1,3 +1,6 @@
+# Geocode one batch CSV using the Bing Spatial Data Services batch
+# dataflow (upload, poll status, download results) rather than the
+# one-request-per-address Locations API used by send_for_geocode.R.
 source("R/bing_api.R")
 library(sf)
 

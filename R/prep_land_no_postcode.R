@@ -1,3 +1,7 @@
+# Clean the "land without a postcode" freehold titles (from
+# import_UK_owners.R): strip mines/minerals boilerplate, compass phrases,
+# land phrases and known strings (data/long_strings.xlsx and
+# data/clean_strings.xlsx), then split into one row per property.
 library(purrr)
 library(combinat)
 library(dplyr)

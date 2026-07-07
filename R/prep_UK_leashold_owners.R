@@ -1,4 +1,7 @@
-# Parse Land Registry Data
+# Prepare the UK company-owned LEASEHOLD titles (CCOD) for geocoding:
+# split multi-postcode titles, apply the standard text cleaning
+# (text_cleaning.R) and split into one row per property.
+# Saves data/UK_leashold_split.Rds.
 library(readr)
 library(purrr)
 library(dplyr)

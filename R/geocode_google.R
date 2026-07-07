@@ -1,6 +1,11 @@
-# Google Maps the ones that Bing Fails on:
+# Retry the addresses that Bing failed to geocode using the Google Maps
+# geocoder (free quota is much smaller, so only the failures are sent).
+# NOTE: expects data/bing_final/bing_geocoded_poor.Rds; the current
+# process_geocodeing_results.R saves the failures as bing_geocoded_fail.Rds
+# (plus _low/_medium/_nola/_wrongla), so combine/rename as appropriate.
 library(mapsapi)
 library(sf)
+library(tmap)
 res_poor <- readRDS("data/bing_final/bing_geocoded_poor.Rds")
 res_poor <- res_poor[!duplicated(res_poor$Id),]
 

@@ -1,4 +1,6 @@
-# Prep locations with multiple postcodes
+# Split the freehold titles containing multiple postcodes (from
+# import_UK_owners.R) into one row per postcode section, then one row per
+# property. Saves data/UK_freehold_pc_multi_split.Rds.
 library(dplyr)
 library(purrr)
 library(stringr)

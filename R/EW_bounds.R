@@ -1,4 +1,7 @@
-#England wales bounds
+# Build a single buffered (1km) boundary of England & Wales, used as a
+# bounding box hint when geocoding. Requires the OS Boundary-Line GeoPackage
+# zip from the saferactive project checked out alongside this repo.
+library(sf)
 
 dir.create("tmp")
 unzip("../../saferactive/saferactive/data/bdline_gpkg_gb.zip",

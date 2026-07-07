@@ -1,4 +1,6 @@
-# Break into csv of 50,000 for geocoding
+# Break a prepared address dataset (data/<type>.Rds) into CSVs of 50,000
+# rows - the Bing daily free quota - saved to OneDrive for_geocoding/,
+# where auto_geocode.R picks them up one per day.
 
 type = "UK_leashold_split"
 

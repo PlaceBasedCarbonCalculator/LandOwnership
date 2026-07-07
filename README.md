@@ -145,6 +145,59 @@ In principle, it would be possible to match the freehold points to the INSPIRE p
 If you do want to check that the point and the polygon match, you can click on the polygon to get the INSPIRE ID, search for it on [the government website](https://search-property-information.service.gov.uk/search/search-by-inspire-id) and the property description should match the property address given for the point. I tested this for a few locations and it seems to work. Obviously once the less precise geocodes are added the correct polygon will be near the point rather than exactly under it.
 
 
+## Repository guide
+
+The R code is in the `R/` folder (plus two scripts in the repo root). The large source datasets live outside the repo on OneDrive (see `R/find_onedrive.R`); intermediate outputs are written to `data/`, which is mostly git-ignored. The scripts are meant to be run interactively / stage-by-stage rather than as a single build.
+
+### INSPIRE polygons
+
+| Script | Purpose |
+| --- | --- |
+| `R/prep_land_registry.R` | Basic import of the INSPIRE polygon zips into one dataset (superseded) |
+| `R/prep_land_registry_alt.R` | Improved import that also merges polygons split along the 500m grid, and exports geojson for tiling |
+
+### Preparing ownership data for geocoding
+
+| Script | Purpose |
+| --- | --- |
+| `R/import_UK_owners.R` | Read the UK company ownership (CCOD) CSV and split freehold titles into categories by geocoding difficulty |
+| `R/prep_address_long.R` | Split long single-postcode addresses into one row per property |
+| `R/prep_address_mulitple_postcode.R` | Split titles containing multiple postcodes |
+| `R/prep_address_no_postcode.R` | Split addresses without postcodes |
+| `R/prep_land_postcode.R` | Clean and split "land" titles with a postcode |
+| `R/prep_land_no_postcode.R` | Clean and split "land" titles without a postcode |
+| `R/prep_UK_leashold_owners.R` | Prepare the UK leasehold titles |
+| `R/prep_oversees_owners.R` | Prepare the overseas ownership (OCOD) data |
+| `R/address_functions.R` | Functions for parsing addresses, e.g. expanding "10-14 (even) Example St" into separate addresses |
+| `R/text_cleaning.R` | Functions that strip legal boilerplate (mines & minerals, airspace, floors/flats, compass phrases) from address text |
+| `R/osm_street_names.R` | Extract road and place names from OpenStreetMap to help recognise them in address strings |
+| `R/prep_roadname_regex.R`, `R/prep_town_regex.R` | Exploration of common words in OSM road/place names |
+
+### Geocoding
+
+| Script | Purpose |
+| --- | --- |
+| `R/bing_api.R` | Functions for the Bing Maps geocoders (batch dataflow and single-address Locations API) |
+| `R/azure_api.R` | Work-in-progress port to the Azure Maps geocoder that replaces Bing |
+| `R/bing_api_routes.R` | Experimental Bing routing/traffic functions (not part of the pipeline) |
+| `R/batch_for_geocoding.R` | Break prepared addresses into 50,000-row CSVs (the daily free quota) |
+| `R/auto_geocode.R` / `R/send_for_geocode.R` | Run the next batch through the geocoder (OneDrive / in-repo variants) |
+| `geocode.R` | Alternative batch geocoding via the Bing Spatial Data Services dataflow |
+| `R/geocode_google.R` | Retry Bing failures with the Google Maps geocoder |
+
+### Results
+
+| Script | Purpose |
+| --- | --- |
+| `prep_la_bounds.R` | Local Authority boundaries matched to Land Registry district names |
+| `R/EW_bounds.R` | Buffered England & Wales outline used as a geocoding bounding hint |
+| `R/process_geocodeing_results.R` | Combine geocoded batches and grade results (good/medium/low/wrong LA/no LA) |
+| `R/map_geocoded_data.R` | Join points back to ownership details and export geojson for the map |
+| `R/summarise_failures.R`, `R/failed_examples.R` | Export titles that failed to parse or geocode |
+| `R/extract_for_susannah.R`, `R/prep_from_jonathan.R` | One-off extracts/imports for collaborators |
+
+API keys are read from environment variables (`Bing_master_key`, `Bing_query_key`, `Google_maps_key`, `Azure_maps_key`) — never commit keys to the repo.
+
 ## A few legal thoughts
 
 While the datasets I've used here are freely published by the Government under the Open Government Licence, there are some conditions around the use of address data owned by the Ordnance Survey and Royal Mail. The [Licence](https://use-land-property-data.service.gov.uk/datasets/ocod/licence/view) permits use for research and for personal and/or non-commercial use.

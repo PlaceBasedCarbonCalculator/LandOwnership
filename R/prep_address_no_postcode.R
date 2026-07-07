@@ -1,4 +1,6 @@
-# No postocdes
+# Split the no-postcode freehold addresses (from import_UK_owners.R) into
+# one row per property. Substations and "part of" titles are set aside as
+# too complex/not geocodable.
 library(purrr)
 library(furrr)
 source("R/address_functions.R")
@@ -27,8 +29,8 @@ AddressLine <- unlist(AddressLine)
 freehold_nopc_good2 <- freehold_nopc_good[rep(1:nrow(freehold_nopc_good), times = reps),]
 freehold_nopc_good2$AddressLine <- AddressLine
 
-foo = freehold_nopc_good2[grepl("\\inclusive\\b",freehold_nopc_good2$AddressLine),]
-
+# QA check: any addresses where the "inclusive" qualifier was not parsed out
+# foo = freehold_nopc_good2[grepl("\\binclusive\\b",freehold_nopc_good2$AddressLine),]
 
 freehold_nopc_bad <- freehold_nopc[!freehold_nopc$Id %in% freehold_nopc_good2$Id,]
 
