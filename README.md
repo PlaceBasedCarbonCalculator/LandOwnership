@@ -147,6 +147,21 @@ If you do want to check that the point and the polygon match, you can click on t
 
 ## Repository guide
 
+### The 2026 pipeline (current)
+
+The current workflow is a [`targets`](https://books.ropensci.org/targets/) pipeline: `_targets.R` at the repo root defines the DAG, and the stage functions live in `pipeline/R/`. It supersedes the hand-run scripts in `R/` (kept for reference; the reusable parsing/cleaning functions in `R/address_functions.R`, `R/text_cleaning.R` and `R/azure_api.R` are still sourced by the pipeline). Run it with `targets::tar_make()`.
+
+Design goals, in order:
+
+1. **Don't re-geocode what hasn't changed.** The 2026 CCOD/OCOD extracts are diffed against the 2022 ones by Title Number (`pipeline/R/diff_ownership.R`); titles with identical address text carry forward their 2022 Bing geocode from `data/bing_final/`.
+2. **Resolve addresses for free before paying.** Split addresses are matched against already-geolocated UPRN resources built in the PlaceBasedCarbonCalculator repo (EPC registers and Land Registry Price Paid linked to OS Open UPRN) on a postcode + house-number key (`pipeline/R/match_free_sources.R`).
+3. **Only the residue goes to Azure Maps** (which replaced the retired Bing API, at a much lower ~5,000 geocodes/month quota). The pipeline stops at a persistent queue (`data/geocoding/queue.rds`); `tar_make()` never calls the API. Batches are run manually with `run_geocode_batch(n, confirm = TRUE)` from `pipeline/R/geocode_batch_runner.R`, which enforces the monthly cap via `logs/azure_usage_log.csv`.
+4. **Link points to parcels.** OS Open UPRN points are spatially joined into the cleaned INSPIRE polygons (`pipeline/R/inspire_uprn_lookup.R`); where a parcel contains exactly one UPRN, an address resolves to its land holding polygon, not just a point. Azure-geocoded points are snapped to their nearest UPRN (`pipeline/R/geocode_uprn_snap.R`) to recover the same linkage.
+
+The final output (`final_combined` target) is one row per property address with UPRN, coordinates, INSPIRE ID where resolvable, ownership details and a `source` tag recording where the location came from.
+
+### The 2022 scripts (superseded)
+
 The R code is in the `R/` folder (plus two scripts in the repo root). The large source datasets live outside the repo on OneDrive (see `R/find_onedrive.R`); intermediate outputs are written to `data/`, which is mostly git-ignored. The scripts are meant to be run interactively / stage-by-stage rather than as a single build.
 
 ### INSPIRE polygons

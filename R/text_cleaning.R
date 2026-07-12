@@ -1,5 +1,10 @@
-# Cleaning Functions
+# Cleaning functions for Land Registry `Property Address` strings.
+# Each clean_*() function replaces a category of legal boilerplate with a
+# short tag (e.g. @MNS, @COMPASS, @LND) so that the remaining text is closer
+# to a geocodable address, and prints how many occurrences of the key word
+# remain afterwards.
 
+# Replace "the airspace above ..." style descriptions with @ASP
 clean_airspace <- function(x){
   
   # Remove the really long strings
@@ -35,8 +40,10 @@ clean_airspace <- function(x){
 }
 
 
+# Replace long "all mines and minerals ... filed at the Registry" style
+# legal descriptions with @MNS
 clean_mines <- function(x){
-  
+
   # Remove the really long strings
   mines_start <- c("all and singular the mines","all and singular and such of the mines",
                    "all and every the mines","all and all manner of mines",
@@ -87,6 +94,7 @@ clean_mines <- function(x){
 }
 
 
+# Replace compass phrases such as "on the north side of" with @COMPASS
 clean_compass <- function(x){
   # Clean compass directions
   compass = c("northerly","easterly","southerly","westerly",
@@ -128,6 +136,8 @@ clean_compass <- function(x){
 }
 
 
+# Correct common spelling errors/variants (adjoining, situated, substation,
+# airspace)
 clean_spelling <- function(x){
   # Clean spelling errors
   spell_adjoining <- c("\\badjoing\\b",
@@ -170,6 +180,9 @@ clean_spelling <- function(x){
   return(x)
 }
 
+# Replace "land"-type phrases with @LND, trailing extras ("and buildings",
+# "and garages", ...) with @EXTRA, and positional phrases ("adjoining",
+# "to the rear of", ...) with @POS
 clean_land <- function(x){
   l1 <- c("","the","a","being","and adjoining")
   l2 <- c("","garden","front garden","glebe","highway","amenity","strip of")
@@ -235,8 +248,12 @@ clean_land <- function(x){
   return(x)
 }
 
+# Remove known boilerplate phrases from x in parallel. `text_rem` is a
+# two-column data frame (term, flag), e.g. read from data/clean_strings.xlsx;
+# longer terms are removed first. Also strips filed-plan references, mangled
+# currency strings and dates.
 clean_phrases <- function(x, text_rem, workers = 30){
-  
+
   names(text_rem) = c("term","flag")
   text_rem$nchar <- nchar(text_rem$term)
   text_rem <- text_rem[order(text_rem$nchar, decreasing = TRUE),]
@@ -255,11 +272,17 @@ clean_phrases <- function(x, text_rem, workers = 30){
   x = gsub("((Absolute)?)(\\s*)(Â£[0-9]+)","",x) #Wierd character strings
   rgx_date = "\\b([1-9]|[0][1-9]|[12][0-9]|3[01])[- /\\.](0[1-9]|1[012])[- /\\.](19|20)\\d\\d\\b"
   x = gsub(rgx_date,"",x) #Dated
-  x = str_squish(x)
+  x = stringr::str_squish(x)
   
   return(x)
 }
 
+# Replace road and place names in x with @RD / @TWN tags, then report the
+# common 3+ word phrases that remain (candidates for the removal lists).
+# `place` is a data frame of OSM place names, e.g.
+# read.csv("data/osm_unique_place_names.csv").
+# If longest_only = TRUE, phrases that are substrings of longer phrases are
+# dropped from the result.
 analyise_text <- function(x, place, workers = 30, longest_only = TRUE){
   # Places
   common_roads = c("Road","Close","Lane","Street","Drive","Avenue","Way","Court",
@@ -272,7 +295,6 @@ analyise_text <- function(x, place, workers = 30, longest_only = TRUE){
                                        replacement = "@RD",
                                        opts_regex = stringi::stri_opts_regex(case_insensitive = TRUE))
 
-  place = read.csv("data/osm_unique_place_names.csv")
   place = place[!place$place %in% c("village","hamlet"),]
   place$nchar <- nchar(place$name)
   place <- place[order(place$nchar, decreasing = TRUE),]
@@ -340,11 +362,15 @@ analyise_text <- function(x, place, workers = 30, longest_only = TRUE){
   
 }
 
+# Collapse a vector of strings into a single word-bounded alternation regex,
+# longest strings first so they match in preference to their substrings.
 regex_collapse <- function(x){
   paste0("\\b((",paste(x[order(nchar(x), decreasing = TRUE)], collapse = ")|("),"))\\b")
 }
 
 
+# Replace floor/flat descriptions such as "ground to second floor flats
+# being" with @FTS
 clean_flats <- function(x){
   
   # ground to second floor flats being

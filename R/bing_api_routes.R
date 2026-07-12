@@ -1,4 +1,10 @@
-bing_route <- function(from = "53.736968,-1.728393", 
+# Experimental functions for the Bing Maps Routes API, including parsing
+# the traffic warnings on a route. Not part of the geocoding pipeline.
+# Requires build_url() from R/bing_api.R, so source that file first.
+
+# Route between two "lat,lng" waypoints and return the route path split
+# into segments with traffic severity attached
+bing_route <- function(from = "53.736968,-1.728393",
                        to = "53.749414,-1.635435", 
                        travelMode = "Driving",
                        dateTime = NULL,
@@ -25,9 +31,12 @@ bing_route <- function(from = "53.736968,-1.728393",
     key = key
   )
   
-  #"https://dev.virtualearth.net/REST/v1/Routes/alternate?key=ApzKwP7FNJPOzD8wNnTzTk2SkG7UzbdfFrBxVyXm8AQ54ftcqHxwpuBUCHsElsHq&o=json&jsonp=Microsoft.Maps.NetworkCallbacks.fe081a&fi=true&errorDetail=true&ur=gb&c=en-GB&wp.0=53.74952,-1.635352[Gelderd%20Road%2C%20LS27%207HH%2C%20England%2C%20United%20Kingdom]&wp.1=53.737025,-1.727514[M606%2C%20BD19%206PL%2C%20England%2C%20United%20Kingdom]&ig=true&ra=routepath,routepathannotations,routeproperties,transitStops,includeCameras,routeInfoCard,TransitFrequency&lm=driving,transit&cn=parkandrides&optmz=timeWithTraffic&du=mi&tt=departure&maxSolns=4&rpo=Points"
-  
-  
+  # Example of the full query the Bing Maps website itself makes:
+  # https://dev.virtualearth.net/REST/v1/Routes/alternate?key=<KEY>&o=json
+  #   &ur=gb&c=en-GB&wp.0=<lat,lng>&wp.1=<lat,lng>
+  #   &ra=routepath,routepathannotations,routeproperties,transitStops
+  #   &optmz=timeWithTraffic&maxSolns=4&rpo=Points
+
   url2 <- build_url(url, query)
   text <- curl::curl_fetch_memory(url2)
   text <- rawToChar(text$content)
@@ -54,15 +63,11 @@ bing_route <- function(from = "53.736968,-1.728393",
   res_legs_itinerary_details <- res_legs_itinerary$details
   res_legs_itinerary_details <- dplyr::bind_rows(res_legs_itinerary_details, .id = "row_id")
   
-  # Warings contain start end of congestions
+  # Warnings contain the start/end of congestion
   warn <- bing_parse_warnings(res_legs_itinerary$warnings)
   path_warn <- bing_match_traffic_to_legs(res_path, warn)
-  qtm(path_warn, lines.col = "severity")
-  
-  
-  
-  
-  
+  # To view: tmap::qtm(path_warn, lines.col = "severity")
+  return(path_warn)
 }
 
 
@@ -100,10 +105,11 @@ bing_annotate_path <- function(x){
   }
   
   ls <- dplyr::bind_rows(ls)
-  
+  return(ls)
 }
 
 
+# Convert a Bing [lat,lng] coordinate matrix into an sfc LINESTRING
 bing_parse_coordinates <- function(x){
   coords = matrix(c(x[,2], x[,1]), ncol = 2)
   coords = sf::st_linestring(coords)
@@ -111,6 +117,8 @@ bing_parse_coordinates <- function(x){
   return(coords)
 }
 
+# Match TrafficFlow warnings to the segments of the route path `l`,
+# returning the path split into lines with a severity attribute
 bing_match_traffic_to_legs <- function(l, warn){
   
   warn = warn[warn$warningType == "TrafficFlow",]
@@ -133,7 +141,7 @@ bing_match_traffic_to_legs <- function(l, warn){
   seqs <- data.frame(warn_id = names(seqs),
                      segment_id = unname(seqs))
   
-  pdf <- st_as_sf(p)
+  pdf <- sf::st_as_sf(p)
   pdf$segment_id <- seq(1, nrow(pdf))
   
   pdf <- dplyr::left_join(pdf, seqs, by = "segment_id")
@@ -189,13 +197,6 @@ bing_parse_point <- function(x){
   coords = lapply(x, `[[`, "coordinates")
   coords = lapply(coords, function(y){sf::st_point(y[2:1])})
   coords = sf::st_as_sfc(coords, crs = 4326)
-  return(coords)
-}
-
-bing_parse_coordinates <- function(x){
-  coords = matrix(c(x[,2], x[,1]), ncol = 2)
-  coords = sf::st_linestring(coords)
-  coords = sf::st_sfc(list(coords), crs = 4326)
   return(coords)
 }
 

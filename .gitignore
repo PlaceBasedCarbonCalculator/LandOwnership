@@ -53,3 +53,9 @@ data/tilegeojson/uk_owners_sample2.geojson
 data/from_jonathan/malcom_enhanced.zip
 data/tilegeojson/landowners.pmtiles
 test.json
+
+# targets pipeline store and its local run artefacts (see _targets.R)
+_targets/
+data/2026/
+data/geocoding/
+logs/

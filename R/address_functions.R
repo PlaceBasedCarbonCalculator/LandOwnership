@@ -13,6 +13,11 @@
 # "15, 16, 19, 23, & 26, Marshal Road  42, 52, 54, Milne Road, Broadstone (BH17 7ND)"
 # 40, 40A, 44 and 44A Tudor Drive, Romford, - note this becomes 40A which is ok in this case but might not be
 
+# Reduce an address containing a range of house numbers to just the first
+# number, e.g. "50 to 67 Example Street" becomes "50 Example Street".
+# `withbrakets` controls whether the odd/even/inclusive qualifiers to strip
+# are expected in brackets, e.g. "(odd)", or as bare words, e.g. "odd".
+# Superseded by split_numbers() which expands the full range instead.
 clean_numbers <- function(x, withbrakets = TRUE){
   # Check for multiple numbers
   if(stringi::stri_count_regex(x, '\\d+') <= 1){
@@ -38,14 +43,14 @@ clean_numbers <- function(x, withbrakets = TRUE){
     y <- gsub("\\(even numbers\\)","",y, ignore.case = TRUE)
   } else {
     # Remove any other words
-    y <- gsub("\\binclusive\\b)","",y, ignore.case = TRUE)
-    y <- gsub("\\binc\\b)","",y, ignore.case = TRUE)
-    y <- gsub("\\bodd\\b)","",y, ignore.case = TRUE)
-    y <- gsub("\\bodd nos\\b)","",y, ignore.case = TRUE)
-    y <- gsub("\\bodd numbers\\b)","",y, ignore.case = TRUE)
-    y <- gsub("\\beven\\b)","",y, ignore.case = TRUE)
-    y <- gsub("\\beven nos\\b)","",y, ignore.case = TRUE)
-    y <- gsub("\\beven numbers\\b)","",y, ignore.case = TRUE)
+    y <- gsub("\\binclusive\\b","",y, ignore.case = TRUE)
+    y <- gsub("\\binc\\b","",y, ignore.case = TRUE)
+    y <- gsub("\\bodd nos\\b","",y, ignore.case = TRUE)
+    y <- gsub("\\bodd numbers\\b","",y, ignore.case = TRUE)
+    y <- gsub("\\bodd\\b","",y, ignore.case = TRUE)
+    y <- gsub("\\beven nos\\b","",y, ignore.case = TRUE)
+    y <- gsub("\\beven numbers\\b","",y, ignore.case = TRUE)
+    y <- gsub("\\beven\\b","",y, ignore.case = TRUE)
   }
   
   
@@ -57,6 +62,12 @@ clean_numbers <- function(x, withbrakets = TRUE){
 
 
 
+# Classify a fragment of an address string as one of:
+# "empty", "number" (e.g. "42"), "number_letter" (e.g. "42A"),
+# "modify" (an odd/even/inclusive marker), "link" (a range separator like
+# "to" or "-"), "sep" (a list separator), "unit" (contains the word "unit"),
+# "road" (longer text, assumed to be a road name) or "other".
+# Used by split_numbers() to parse number ranges out of addresses.
 class_string <- function(str){
   n_char <- nchar(str)
   if(n_char == 0){
@@ -100,14 +111,19 @@ class_string <- function(str){
   }
   
   return("other")
-  warning("other in: ",str)
 }
 
 
 
+# Expand a table of house numbers (built by split_numbers) into the full
+# vector of individual numbers. Rows flagged as `link` are ranges and are
+# expanded, stepping by 1 ("(INC)") or 2 ("(ODD)"/"(EVN)").
 parse_number_table <- function(spt_tab){
+  if(nrow(spt_tab) == 0){
+    return(character(0))
+  }
   nmbs <- list()
-  for(i in seq(nrow(spt_tab),1)){
+  for(i in rev(seq_len(nrow(spt_tab)))){
     n <- spt_tab$number[i]
     if(spt_tab$link[i]){
       mv <- "(INC)"
@@ -144,7 +160,14 @@ parse_number_table <- function(spt_tab){
 }
 
 
-# Needs postcode removed first
+# Split an address containing multiple house numbers into one address per
+# property, expanding ranges, e.g. "10-14 (even) Example Street" becomes
+# c("10 Example Street", "12 Example Street", "14 Example Street").
+# Handles multiple roads within one string, odd/even/inclusive qualifiers
+# and letter suffixes (e.g. "103a and 103b").
+# The postcode must be removed from x first.
+# Returns x unchanged if there is nothing to split; may throw an error on
+# unparseable strings, so prefer split_numbers_try() for bulk use.
 split_numbers <- function(x){
   
   # x = "15, 16, 19, 23, & 26, Marshal Road  42, 52, 54, Milne Road, Broadstone"
@@ -407,6 +430,8 @@ split_numbers <- function(x){
 }
 
 
+# Error-tolerant wrapper around split_numbers(); returns NULL (and prints a
+# message) for strings that fail to parse instead of stopping.
 split_numbers_try <- function(x){
   r <- try(split_numbers(x), silent = TRUE)
   if(any(class(r)=="try-error")){
@@ -418,16 +443,22 @@ split_numbers_try <- function(x){
 }
 
 
+# Find which of the candidate phrases `perms` occur in the string `x`.
+# Returns NA if none match, the single phrase if one matches, or the
+# matching phrases collapsed with "|" if several distinct ones match
+# (matches that are substrings of a longer match are dropped).
+# If startonly = TRUE, phrases only count when at the start of x.
+# Superseded by check_match2(), which is faster.
 check_match <- function(x, perms, startonly = TRUE){
-  
+
   if(startonly){
     perms = paste0("^",perms)
   }
-  
+
   y = vapply(perms, grepl, TRUE, x = x, USE.NAMES = FALSE, ignore.case = TRUE)
   y = perms[y]
   ly = length(y)
-  
+
   if(ly == 0){
     return(NA_character_)
   }
@@ -437,15 +468,15 @@ check_match <- function(x, perms, startonly = TRUE){
     }
     return(y)
   }
-  
+
   if(startonly){
     y = substr(y,2,nchar(y))
   }
-  
+
   # check for short matches in long matches
   y = data.frame(y = y)
   y$nchar <- nchar(y$y)
-  if(length(y[y$nchar == max(y$nchar)]) > 1){
+  if(sum(y$nchar == max(y$nchar)) > 1){
     y <- paste0(y$y, collapse = "|")
     return(y)
   } else {
@@ -460,6 +491,9 @@ check_match <- function(x, perms, startonly = TRUE){
 }
 
 
+# Faster version of check_match() using stringi. Same return behaviour:
+# NA if no phrase in `perms` matches x, the phrase if exactly one matches,
+# or the distinct matches collapsed with "|".
 check_match2 <- function(x, perms, startonly = TRUE){
   
   if(startonly){
@@ -503,6 +537,9 @@ check_match2 <- function(x, perms, startonly = TRUE){
   y
 }
 
+# Remove every occurrence of each string in `y` from `x` (case-insensitive).
+# Each string is removed three times over because removing one phrase can
+# expose another occurrence of it (e.g. nested/overlapping boilerplate).
 remove_strings <- function(x, y){
   for(i in seq_along(y)){
     for(j in 1:3){
@@ -514,6 +551,8 @@ remove_strings <- function(x, y){
 }
 
 
+# Replace each whole-word occurrence of the strings in `y` with `rep`
+# (case-insensitive) in x.
 replace_strings <- function(x, y, rep){
   for(i in seq_along(y)){
     x <- stringi::stri_replace_all_regex(x, paste0("\\b",y[i],"\\b"),rep, 
