@@ -31,7 +31,30 @@ audit_split_addresses <- function(categorised, split_result) {
     split_result$parse_ok & nchar(split_result$AddressLine) > 90,
   ]
 
+  # Cleaning-quality metrics (audit recommendation 10): these are the
+  # regressions that previously only showed up as wasted Azure quota.
+  ok <- split_result[split_result$parse_ok, ]
+  al <- ok$AddressLine
+  quality_metrics <- list(
+    n_tag_leakage = sum(grepl("@[A-Za-z]+", al)),
+    n_bare_number = sum(grepl("^[0-9]+[A-Za-z]?$", trimws(al))),
+    n_leading_glue = sum(grepl(
+      "^\\s*[,;:.)]|^(and|of|to|being|the site of|site of)\\b", al,
+      ignore.case = TRUE
+    )),
+    postcode_presence_rate = round(
+      mean(!is.na(ok$PostalCode) & ok$PostalCode != ""), 4
+    ),
+    n_identical_to_raw = sum(al == ok$`Property Address`, na.rm = TRUE),
+    n_residual_boilerplate = sum(grepl(
+      "\\b(filed plan|filed at the registry|deed dated|edged red|inclusive)\\b",
+      al,
+      ignore.case = TRUE
+    ))
+  )
+
   list(
+    quality_metrics = quality_metrics,
     titles_by_category = titles_by_category,
     addresses_by_category = rows_by_category,
     n_titles_total = nrow(categorised),

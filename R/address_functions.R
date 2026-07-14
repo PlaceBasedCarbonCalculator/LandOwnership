@@ -154,7 +154,9 @@ parse_number_table <- function(spt_tab){
   }
   nmbs <- unlist(nmbs)
   nmbs <- nmbs[!duplicated(nmbs)]
-  nmbs <- nmbs[order(nmbs)]
+  # numeric-aware ordering ("2" before "10"; "84A" after "84")
+  suppressWarnings(num_part <- as.numeric(gsub("[A-Za-z]", "", nmbs)))
+  nmbs <- nmbs[order(num_part, nmbs)]
   return(nmbs)
   
 }
@@ -297,10 +299,15 @@ split_numbers <- function(x){
 
   # Last Chance
   # These will catch any missed but a too broad
-  x <- gsub("odd\\)","(ODD)",x, ignore.case = FALSE)
-  x <- gsub("even\\)","(EVN)",x, ignore.case = TRUE)
-  x <- gsub("\\(odd\\b","(ODD)",x, ignore.case = FALSE)
-  x <- gsub("\\(even\\b","(EVN)",x, ignore.case = TRUE)
+  # (odd and even are handled identically - the odd variants used to be
+  # case-sensitive, so "(35 Odd)" escaped normalisation while "(35 Even)"
+  # didn't; audit F5. The lookarounds stop the patterns re-matching the
+  # already-normalised "(ODD)"/"(EVN)" tokens themselves, which is what the
+  # old case-sensitivity was accidentally protecting against.)
+  x <- gsub("(?<!\\()odd\\)","(ODD)",x, ignore.case = TRUE, perl = TRUE)
+  x <- gsub("(?<!\\()even\\)","(EVN)",x, ignore.case = TRUE, perl = TRUE)
+  x <- gsub("\\(odd\\b(?!\\))","(ODD)",x, ignore.case = TRUE, perl = TRUE)
+  x <- gsub("\\(even\\b(?!\\))","(EVN)",x, ignore.case = TRUE, perl = TRUE)
   x <- gsub("\\binclusiveodd numbers\\b","(ODD)",x, ignore.case = TRUE)
   x <- gsub("\\binclusiveeven numbers\\b","(EVN)",x, ignore.case = TRUE)
   x <- gsub("\\bodd numbers inclusive\\b","(ODD)",x, ignore.case = TRUE)
@@ -313,7 +320,7 @@ split_numbers <- function(x){
   x <- gsub("\\beven numbers\\b","(EVN)",x, ignore.case = TRUE)
   
   x <- gsub("\\binclusive\\b","(INC)",x, ignore.case = TRUE)
-  x <- gsub("\\bodd\\b ","(ODD)",x, ignore.case = FALSE)
+  x <- gsub("\\bodd\\b ","(ODD)",x, ignore.case = TRUE)
   x <- gsub("\\beven\\b ","(EVN)",x, ignore.case = TRUE)
   
   x <- gsub(" nos ","",x, ignore.case = TRUE)

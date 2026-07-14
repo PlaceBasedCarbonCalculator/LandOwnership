@@ -92,10 +92,114 @@ split_multi_postcode <- function(df, address_col = "Property Address") {
 # too ambiguous to key on safely (every no-postcode row would otherwise
 # collide with every other no-postcode row).
 normalise_match_key <- function(address, postcode) {
-  pc <- toupper(gsub("[^A-Za-z0-9]", "", postcode))
-  pc[pc == ""] <- NA_character_
-  house <- toupper(stringr::str_extract(address, "^[0-9]+[A-Za-z]?"))
+  pc <- normalise_postcode(postcode)
+  house <- extract_house_number(address)
   key <- paste(pc, house, sep = "|")
   key[is.na(pc) | is.na(house)] <- NA_character_
   key
+}
+
+normalise_postcode <- function(postcode) {
+  pc <- toupper(gsub("[^A-Za-z0-9]", "", postcode))
+  pc[pc == ""] <- NA_character_
+  pc
+}
+
+# Leading house-number token: "22", "84A". NA when the address doesn't
+# start with a number.
+extract_house_number <- function(address) {
+  toupper(stringr::str_extract(address, "^[0-9]+[A-Za-z]?\\b"))
+}
+
+# Street name from a "22 Acacia Avenue" style first address segment. Only
+# trusted when the segment starts with a house number (otherwise the
+# segment is a building/estate name, not a street). Returns NA otherwise.
+extract_street_name <- function(address) {
+  seg <- stringr::str_extract(address, "^[^,]+")
+  has_number <- grepl("^\\s*[0-9]+[A-Za-z]?\\b", seg)
+  street <- sub("^\\s*[0-9]+[A-Za-z]?\\b[\\s,]*", "", seg, perl = TRUE)
+  street <- stringr::str_squish(street)
+  street[!has_number | is.na(street) | nchar(street) < 4] <- NA_character_
+  street
+}
+
+# Uppercase, alphanumeric-only normalisation for street / district names so
+# "Fir Tree Gardens" and "FIR-TREE GARDENS" key identically.
+normalise_name <- function(x) {
+  x <- toupper(x)
+  x <- gsub("[^A-Z0-9 ]", " ", x)
+  x <- stringr::str_squish(x)
+  x[x == ""] <- NA_character_
+  x
+}
+
+# (postcode, building-name) key for addresses that start with a name rather
+# than a number ("Ivy Cottage, Ackton Lane"). Generic leading words (FLAT,
+# UNIT, LAND, ...) are refused - "Flat 3" is not a building name and would
+# collide across every block at the postcode.
+generic_leading_words <- c(
+  "FLAT", "FLATS", "UNIT", "UNITS", "APARTMENT", "APARTMENTS", "PLOT",
+  "LAND", "GARAGE", "GARAGES", "STORE", "STORES", "SUITE", "ROOM", "ROOMS",
+  "PART", "SITE", "REAR", "FIRST", "SECOND", "THIRD", "GROUND", "BASEMENT",
+  "THE SITE", "CAR", "PARKING", "AIRSPACE"
+)
+
+normalise_building_key <- function(address, postcode) {
+  pc <- normalise_postcode(postcode)
+  seg <- stringr::str_extract(address, "^[^,]+")
+  name <- normalise_name(seg)
+  first_word <- stringr::str_extract(name, "^[A-Z0-9]+")
+  bad <- is.na(name) | nchar(name) < 4 |
+    grepl("^[0-9]", name) |
+    first_word %in% generic_leading_words
+  key <- paste(pc, name, sep = "|")
+  key[is.na(pc) | bad] <- NA_character_
+  key
+}
+
+# (district, street, house number) key for rows with no postcode at all.
+# All three parts are required - without a district a nationwide
+# street+number key would collide constantly ("23 High Street").
+street_number_key <- function(number, street, district) {
+  n <- toupper(number)
+  s <- normalise_name(street)
+  d <- normalise_name(district)
+  key <- paste(d, s, n, sep = "|")
+  key[is.na(n) | is.na(s) | is.na(d)] <- NA_character_
+  key
+}
+
+# Final tidy applied to every AddressLine after all cleaning/splitting:
+# guarantees no internal @TAGs, empty brackets, leading legal glue
+# ("the site of", "being", "adjoining", "north of", ...) or dangling
+# punctuation reach the free-matching stage or the paid geocoder. The
+# pre-tidy string is kept by the caller (AddressLine_tagged) because the
+# tags encode what kind of title the text described.
+final_address_tidy <- function(x) {
+  ci <- stringi::stri_opts_regex(case_insensitive = TRUE)
+  x <- stringi::stri_replace_all_regex(x, "@[A-Za-z]+", " ")
+  x <- stringi::stri_replace_all_regex(x, "\\(\\s*\\)", " ")
+  # runs of commas/semicolons left behind by phrase removal
+  x <- stringi::stri_replace_all_regex(x, "\\s*[,;]\\s*(?=[,;])", "")
+  glue_rx <- paste0(
+    "^[\\s\\p{P}]*",
+    "((and|of|at|on|to|off|being|adjoining|adjacent to|",
+    "the site of|site of|the rear of|rear of|land at|",
+    "forming|formerly|",
+    "(the |on the )?(north|south|east|west)([ -](east|west))?(ern)?",
+    "( side| end| corner)? of)\\b[\\s\\p{P}]*)+"
+  )
+  for (i in 1:3) {
+    x <- stringi::stri_replace_first_regex(x, glue_rx, "", opts_regex = ci)
+  }
+  # trailing orphan joining words
+  x <- stringi::stri_replace_last_regex(
+    x, "([\\s\\p{P}]+\\b(and|of|at|on|being|to|the)\\b)+[\\s\\p{P}]*$", "",
+    opts_regex = ci
+  )
+  x <- stringi::stri_replace_all_regex(x, "\\s+([,;.])", "$1")
+  x <- stringr::str_squish(x)
+  x <- sub("^[[:punct:][:space:]]+", "", x)
+  x <- sub("[,;[:space:]]+$", "", x)
+  x
 }

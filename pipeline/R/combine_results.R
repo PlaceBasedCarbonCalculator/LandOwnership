@@ -41,7 +41,9 @@ combine_final <- function(carried_forward, free_matched, azure_results, queue,
   fm$uprn <- as.character(fm$UPRN)
   fm$latitude <- fm$LATITUDE
   fm$longitude <- fm$LONGITUDE
-  fm$match_quality <- NA_character_
+  if (!"match_quality" %in% names(fm)) {
+    fm$match_quality <- NA_character_ # older free_match outputs had no quality tag
+  }
 
   geocoded <- dplyr::inner_join(queue, azure_results, by = "queue_key")
   geocoded <- snap_geocoded_to_uprn(geocoded, uprn_historical) # handles nrow(geocoded) == 0 internally

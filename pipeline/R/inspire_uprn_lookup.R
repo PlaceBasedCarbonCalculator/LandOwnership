@@ -5,7 +5,7 @@
 #
 # Polygon cleaning logic ported from R/prep_land_registry_alt.R (LA-by-LA
 # GML import, merging parcels that were artificially split along the 500m
-# British National Grid). Two changes from the original:
+# British National Grid). Changes from the original:
 #   - Kept in native EPSG:27700 (British National Grid) instead of
 #     reprojecting to 4326 - that reprojection was only needed for the
 #     tile-publishing geojson output; the UPRN spatial join is more
@@ -15,33 +15,54 @@
 #     GeometryCollection is unsupported" but doesn't actually handle it -
 #     a single bad LA would crash the entire ~300+ LA run. Failures are now
 #     logged and skipped instead.
+#   - Runs LAs in parallel (furrr/future multisession), same fix as the
+#     build repo's R/inspire_v2.R for the identical sequential bottleneck
+#     (v1 of load_inspire_clean() took days single-threaded over ~318 LAs;
+#     each LA is independent so they parallelise directly). clean_inspire_la()
+#     already extracts to a tempfile()-unique dir per call, so it's safe to
+#     run concurrently without change.
 
 # Reads every INSPIRE zip in `path` (one per Local Authority) and returns
 # cleaned polygons with `local_authority`, `INSPIREID`, `area` (m2).
 # When options(pipeline.sample_n = <n>) is set, only the first `n` zips are
 # processed (INSPIRE cleaning is slow - this is for smoke-testing).
-load_inspire_clean <- function(path) {
+load_inspire_clean <- function(path, workers = NULL) {
   zips <- list.files(path, pattern = "\\.zip$", full.names = TRUE)
   sample_n <- pipeline_sample_zips()
   if (!is.na(sample_n)) {
     zips <- utils::head(zips, sample_n)
   }
 
-  polys <- list()
-  failures <- character(0)
-
-  for (i in seq_along(zips)) {
-    la_result <- tryCatch(clean_inspire_la(zips[i]), error = function(e) e)
-    if (inherits(la_result, "error")) {
-      message("INSPIRE cleaning failed for ", basename(zips[i]), ": ", conditionMessage(la_result))
-      failures <- c(failures, zips[i])
-      next
-    }
-    message(Sys.time(), " ", basename(zips[i]), " ", nrow(la_result), " polygons")
-    polys[[length(polys) + 1]] <- la_result
+  if (is.null(workers)) {
+    workers <- min(8, max(1, future::availableCores() - 1))
   }
+  future::plan("multisession", workers = workers)
+  on.exit(future::plan("sequential"), add = TRUE)
 
-  nms <- gsub("\\.zip$", "", basename(zips[!zips %in% failures]))
+  la_results <- furrr::future_map(
+    zips,
+    function(zip) {
+      tryCatch(
+        {
+          result <- clean_inspire_la(zip)
+          message(Sys.time(), " ", basename(zip), " ", nrow(result), " polygons")
+          result
+        },
+        error = function(e) {
+          message("INSPIRE cleaning failed for ", basename(zip), ": ", conditionMessage(e))
+          e
+        }
+      )
+    },
+    .progress = TRUE,
+    .options = furrr::furrr_options(seed = TRUE)
+  )
+
+  failed <- vapply(la_results, inherits, logical(1), "error")
+  polys <- la_results[!failed]
+  failures <- zips[failed]
+
+  nms <- gsub("\\.zip$", "", basename(zips[!failed]))
   nms <- gsub("_Borough_Council|_District_Council|_Metropolitan_Borough_Council|_Council", "", nms)
   nms <- gsub("_", " ", nms)
   names(polys) <- nms
@@ -153,8 +174,7 @@ clean_inspire_la <- function(zip_path) {
 
   poly_new$area <- round(as.numeric(sf::st_area(poly_new)))
   poly_new <- sf::st_make_valid(poly_new)
-  poly_new <- poly_new[!sf::st_is_empty(poly_new), ]
-  sf::st_cast(poly_new, "MULTIPOLYGON")
+  poly_new[!sf::st_is_empty(poly_new), ]
 }
 
 # Spatial-join OS Open UPRN points (native BNG, from uprn_historical) into

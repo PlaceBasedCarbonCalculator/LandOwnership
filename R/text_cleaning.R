@@ -28,7 +28,12 @@ clean_airspace <- function(x){
   
   airspace_start <- paste0("(",paste(airspace_start, collapse = ")|("),")")
   airspace_end <- paste0("(",paste(airspace_end, collapse = ")|("),")")
-  airspace <- paste0("(",airspace_start,").*(",airspace_end,")")
+  # Lazy and bounded (audit F3): the old greedy ".*" ran to the LAST end
+  # marker in the string - "being" is an end marker and a very common word,
+  # so whole addresses could be swallowed. Lazy stops at the first end
+  # marker; the 150-char bound stops a start marker pairing with an end
+  # marker in a different clause entirely.
+  airspace <- paste0("\\b(",airspace_start,")\\b.{0,150}?\\b(",airspace_end,")\\b")
   
   x <- stringi::stri_replace_all_regex(str = x, pattern =  airspace,
                                        replacement = "@ASP",
@@ -82,7 +87,12 @@ clean_mines <- function(x){
   
   mines_start <- paste0("(",paste(mines_start, collapse = ")|("),")")
   mines_end <- paste0("(",paste(mines_end, collapse = ")|("),")")
-  mines <- paste0("(",mines_start,").*(",mines_end,")")
+  # Lazy and bounded (audit F3, see clean_airspace). Mines clauses are long,
+  # so the bound is generous - but no longer unlimited: the old greedy ".*"
+  # could consume a real address sandwiched between two mines clauses
+  # (seen in the 2026 queue: "...being 17B Curzon Street, London within the
+  # area @MNS ..." where the middle of the address was eaten).
+  mines <- paste0("\\b(",mines_start,")\\b.{0,300}?\\b(",mines_end,")\\b")
   
   x <- stringi::stri_replace_all_regex(str = x, pattern =  mines,
                                        replacement = "@MNS",
@@ -252,28 +262,41 @@ clean_land <- function(x){
 # two-column data frame (term, flag), e.g. read from data/clean_strings.xlsx;
 # longer terms are removed first. Also strips filed-plan references, mangled
 # currency strings and dates.
-clean_phrases <- function(x, text_rem, workers = 30){
+#
+# The `flag` column: rows flagged "f" are directional fragments ("@lnd @pos
+# east of", "to @compass", ...) whose removal deletes the positional meaning
+# of the address. They were being removed anyway because no code ever read
+# the flag (audit F6); they are now excluded - the residual "east of" style
+# glue is trimmed harmlessly by final_address_tidy() instead.
+clean_phrases <- function(x, text_rem, workers = getOption("pipeline.clean_workers", 30)){
 
   names(text_rem) = c("term","flag")
+  text_rem <- text_rem[!is.na(text_rem$term),]
+  text_rem <- text_rem[is.na(text_rem$flag) | text_rem$flag != "f",]
   text_rem$nchar <- nchar(text_rem$term)
   text_rem <- text_rem[order(text_rem$nchar, decreasing = TRUE),]
-  text_rem <- text_rem[!is.na(text_rem$term),]
-  text_rem <- text_rem[!duplicated(text_rem$term),]
-  
-  
+  # removal is case-insensitive, so dedupe case-insensitively too
+  text_rem <- text_rem[!duplicated(tolower(text_rem$term)),]
+
+
   message("Starting at ",Sys.time()," with ",workers," workers")
   future::plan(future::multisession, workers = workers)
   x = furrr::future_map_chr(x, remove_strings, y = text_rem$term, .progress = TRUE)
   future::plan(future::sequential)
   message("\nFinished at ",Sys.time())
-  
-  
+
+
   x = gsub("numbered [0-9]+ on the filed plan","",x)
-  x = gsub("((Absolute)?)(\\s*)(Â£[0-9]+)","",x) #Wierd character strings
+  x = gsub("((Absolute)?)(\\s*)((Â?£|GBP ?)[0-9,.]+)","",x) # currency, incl. 2022 mojibake form
   rgx_date = "\\b([1-9]|[0][1-9]|[12][0-9]|3[01])[- /\\.](0[1-9]|1[012])[- /\\.](19|20)\\d\\d\\b"
-  x = gsub(rgx_date,"",x) #Dated
+  x = gsub(rgx_date,"",x) #Dated (numeric form)
+  # Spelled-out dates: only removed with an unambiguous day-month-year shape
+  # or a "dated"/"deed dated" prefix - bare month words can be street names.
+  months_rx = "(January|February|March|April|May|June|July|August|September|October|November|December)"
+  x = gsub(paste0("\\b[0-9]{1,2}(st|nd|rd|th)?( day of)? ", months_rx, ",? (19|20)[0-9]{2}\\b"), "", x, ignore.case = TRUE)
+  x = gsub("\\b(deed |lease |conveyance |transfer )?dated( the)?\\b", "", x, ignore.case = TRUE)
   x = stringr::str_squish(x)
-  
+
   return(x)
 }
 
@@ -377,7 +400,7 @@ clean_flats <- function(x){
   flat_start <- c("lower ground","ground","the flat","the","a")
   flat_join <- c("to","and")
   numbers <- c("first","second","third","fourth","fifth","sixth","seventh",
-               "eight","ninth","tenth","eleventh",
+               "eighth","eight","ninth","tenth","eleventh",
                "twelfth","thirteenth","fourteenth",
                "1st","2nd","3rd","4th","5th","6th","7th",
                "8th","9th","10th","11th",

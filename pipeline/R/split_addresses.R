@@ -107,7 +107,11 @@ build_split_addresses <- function(categorised, text_rem, long_text_rem = NULL) {
   nopc_split <- split_nopc_complex(nopc_rows)
   nopc_complex <- nopc_split$complex
   nopc_simple <- nopc_split$simple
-  nopc_simple$AddressLine <- nopc_simple$`Property Address`
+  # nopc titles have no postcode, so the address text is all the geocoder
+  # gets - give them the light-touch spelling pass (the heavier boilerplate
+  # lists stay boilerplate-category-only); leading glue like "the site of"
+  # is trimmed by final_address_tidy() below.
+  nopc_simple$AddressLine <- clean_spelling(nopc_simple$`Property Address`)
 
   simple_categories <- c("simple_short", "simple_long", "multi_postcode")
   simple_df <- categorised[categorised$category %in% simple_categories, ]
@@ -120,6 +124,17 @@ build_split_addresses <- function(categorised, text_rem, long_text_rem = NULL) {
   }
 
   simple_df <- dplyr::bind_rows(simple_df, nopc_simple)
+
+  # simple_short / simple_long rows had their postcode stripped out of the
+  # text at categorisation but PostalCode was never populated (audit F1) -
+  # without it they can neither free-match nor be sent to Azure with a
+  # postcode. Carry the registry Postcode across wherever it's missing.
+  if (!"PostalCode" %in% names(simple_df)) {
+    simple_df$PostalCode <- NA_character_
+  }
+  fill_pc <- is.na(simple_df$PostalCode) & !is.na(simple_df$Postcode)
+  simple_df$PostalCode[fill_pc] <- simple_df$Postcode[fill_pc]
+
   simple_result <- split_and_explode(simple_df, "AddressLine")
 
   boilerplate_categories <- c("land_pc", "nopc_land", "leasehold", "overseas")
@@ -133,12 +148,19 @@ build_split_addresses <- function(categorised, text_rem, long_text_rem = NULL) {
   )
 
   result <- dplyr::bind_rows(simple_result, boilerplate_result)
-  result$AddressLine <- stringr::str_squish(result$AddressLine)
+  # Keep the tagged intermediate (it encodes what kind of title the text
+  # described - @MNS, @ASP, ... - useful for grading results later), then
+  # guarantee the geocoder-facing AddressLine is free of tags, empty
+  # brackets, leading legal glue and dangling punctuation (audit F8/F9).
+  result$AddressLine_tagged <- result$AddressLine
+  result$AddressLine <- final_address_tidy(result$AddressLine)
   result <- result[!is.na(result$AddressLine) & nchar(result$AddressLine) > 0, ]
   result$parse_ok <- TRUE
 
-  nopc_complex$AddressLine <- NA_character_
-  nopc_complex$parse_ok <- FALSE
+  # rep() so this also works when nopc_complex has zero rows (scalar
+  # assignment into a 0-row base data.frame is an error)
+  nopc_complex$AddressLine <- rep(NA_character_, nrow(nopc_complex))
+  nopc_complex$parse_ok <- rep(FALSE, nrow(nopc_complex))
 
   dplyr::bind_rows(result, nopc_complex)
 }

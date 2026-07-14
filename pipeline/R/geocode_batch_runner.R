@@ -48,6 +48,10 @@ run_geocode_batch <- function(n,
     message("Queue is empty - nothing to geocode.")
     return(invisible(NULL))
   }
+  # postcode-bearing rows first: higher expected success per paid call
+  # (audit recommendation 11)
+  has_pc <- !is.na(pending$PostalCode) & pending$PostalCode != ""
+  pending <- pending[order(!has_pc), ]
   batch <- pending[seq_len(min(n, nrow(pending))), ]
 
   message(

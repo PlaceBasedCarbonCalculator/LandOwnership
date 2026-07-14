@@ -22,10 +22,28 @@ tar_source("pipeline/R") # pure function definitions only - never R/ (old script
 onedrive <- find_onedrive()
 inspire_path <- "F:/GitHub/PlaceBasedCarbonCalculator/inputdata/INSPIRE"
 
+# Static open-data downloads used by the UPRN address-infill stage
+# (pipeline/R/uprn_infill.R). Plain path constants like inspire_path -
+# deliberately NOT format = "file" targets, because hashing a 30GB gpkg on
+# every tar_make() costs minutes for files that only change when manually
+# re-downloaded. Bump the filename/version here when a new release lands.
+lids_path <- "F:/GitHub/PlaceBasedCarbonCalculator/inputdata/os_uprn/lids-2026-06_csv_BLPU-UPRN-Street-USRN-11.zip"
+usrn_geom_path <- "F:/GitHub/PlaceBasedCarbonCalculator/inputdata/os_usrn/osopenusrn_202607_gpkg.zip"
+osm_gpkg_path <- "F:/GitHub/PlaceBasedCarbonCalculator/inputdata/osm/united-kingdom-latest.gpkg"
+# The .osm.pbf next to the gpkg: the gpkg only contains the multipolygons
+# layer (it was made by the sibling repo's read_osm_pbf_buildings() via
+# osmextract), so road lines are pulled from the pbf instead -
+# load_osm_road_names() translates the "lines" layer into the same cached
+# gpkg once, on first run.
+osm_pbf_path <- "F:/GitHub/PlaceBasedCarbonCalculator/inputdata/osm/united-kingdom-latest.osm.pbf"
+# National Statistics UPRN Lookup: authoritative UPRN -> postcode + local
+# authority for every E&W UPRN. Bump on new epoch downloads.
+nsul_path <- "F:/GitHub/PlaceBasedCarbonCalculator/inputdata/os_uprn/NSUL_E126_MAY_2026.zip"
+
 tar_option_set(
   packages = c(
     "readr", "dplyr", "purrr", "stringr", "stringi", "sf", "readxl",
-    "data.table", "plyr", "lwgeom", "stplanr"
+    "data.table", "plyr", "lwgeom", "stplanr", "future", "furrr"
   )
 )
 
@@ -78,7 +96,55 @@ list(
   # --- Stage 6: free-source matching (tasks 5/6) ---
   tar_target(epc_lookup, build_epc_lookup(ext_uprn_epc_lr)),
   tar_target(price_paid_lookup, build_price_paid_lookup(ext_house_price_lr_uprn)),
-  tar_target(free_match, match_free_sources(carry_forward$needs_geocode, epc_lookup, price_paid_lookup)),
+  tar_target(building_lookup, build_building_lookup(ext_uprn_epc_lr, ext_house_price_lr_uprn)),
+
+  # --- Stage 6b: UPRN address infill (OS Linked Identifiers + Open USRN + OSM) ---
+  # See pipeline/R/uprn_infill.R. Everything inferred is flagged with
+  # address_source / number_source / number_guessed - gap-guessed house
+  # numbers are never treated as better than "guess" quality.
+  tar_target(uprn_usrn, load_uprn_usrn_lookup(lids_path)),
+  tar_target(usrn_geom, load_usrn_geometry(usrn_geom_path)),
+  tar_target(osm_addresses, load_osm_building_addresses(osm_gpkg_path)),
+  tar_target(osm_road_names, load_osm_road_names(osm_pbf_path)),
+  tar_target(la_bounds_file, "data/la_bounds.geojson", format = "file"),
+  tar_target(known_uprn_addresses, build_known_uprn_addresses(ext_uprn_epc_lr, ext_house_price_lr_uprn)),
+  tar_target(postcode_district, build_postcode_district_lookup(ccod_2026_raw, ocod_2026_raw)),
+
+  # NSUL: authoritative per-UPRN postcode + district (LR-spelling via
+  # build_lad_district_lookup). Feeds street naming, infill enrichment,
+  # gap-guess validation and the postcode-singleton stage.
+  tar_target(nsul, load_nsul(nsul_path)),
+  tar_target(nsul_lad_names, load_nsul_lad_names(nsul_path)),
+  tar_target(lad_district, build_lad_district_lookup(nsul, postcode_district, nsul_lad_names)),
+  tar_target(uprn_places, build_uprn_places(nsul, lad_district)),
+
+  tar_target(
+    usrn_street_names,
+    build_usrn_street_names(
+      uprn_usrn, known_uprn_addresses, postcode_district,
+      usrn_geom, osm_road_names, la_bounds_file, uprn_places
+    )
+  ),
+  tar_target(
+    uprn_infill,
+    build_uprn_infill(
+      ext_uprn_epc_lr, uprn_usrn, usrn_street_names, known_uprn_addresses,
+      usrn_geom, osm_addresses, postcode_district, uprn_places
+    )
+  ),
+  tar_target(street_lookup, build_street_lookup(known_uprn_addresses, postcode_district)),
+  tar_target(infill_lookup, build_infill_lookup(uprn_infill)),
+  tar_target(postcode_singleton_lookup, build_postcode_singleton_lookup(nsul, ext_uprn_historical)),
+  tar_target(street_centroid_lookup, build_street_centroid_lookup(usrn_street_names, usrn_geom)),
+
+  tar_target(
+    free_match,
+    match_free_sources(
+      carry_forward$needs_geocode, epc_lookup, price_paid_lookup,
+      building_lookup, street_lookup, infill_lookup,
+      postcode_singleton_lookup, street_centroid_lookup
+    )
+  ),
 
   # --- Stage 7: INSPIRE <-> UPRN lookup (task 7) ---
   tar_target(inspire_clean, load_inspire_clean(inspire_path)),
