@@ -109,7 +109,16 @@ build_substation_uprn_lookup <- function(osm_substation_points, osm_substation_p
   )
   pts <- osm_substation_points[!osm_substation_points$osm_id %in% poly_hits$osm_id, ]
   if (nrow(pts) > 0) {
-    near <- sf::st_is_within_distance(pts, uprn_pts, dist = point_tolerance_m)
+    # st_is_within_distance does a full pairwise distance search against
+    # every UPRN nationally and is prohibitively slow at that scale.
+    # nngeo::st_nn uses a kd-tree (nabor::knn) instead - k = 2 rather than
+    # k = 1 so a second UPRN within tolerance is still visible and the
+    # unambiguous-match check below behaves the same as the st_is_within_
+    # distance version.
+    near <- nngeo::st_nn(
+      pts, uprn_pts,
+      k = 2, maxdist = point_tolerance_m, returnDist = FALSE, progress = FALSE
+    )
     n_hit <- lengths(near)
     unambiguous <- n_hit == 1
     if (any(unambiguous)) {
