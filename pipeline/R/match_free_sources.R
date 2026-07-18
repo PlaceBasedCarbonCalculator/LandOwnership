@@ -10,6 +10,10 @@
 #      (for rows with no postcode - street name + district instead)
 #   5. (postcode|street keys) vs infilled UPRNs   - quality "medium" for
 #      OSM-tagged addresses, "guess" for gap-guessed house numbers
+#   5b. (district, street) vs OSM/UPRN substations - quality "medium", or
+#      "low" for the district-singleton fallback - see substations.R. Only
+#      tried on rows is_substation_address() flags, so it can never steal an
+#      ordinary title that happens to share a street with a substation.
 #   6. postcode-singleton                         - quality "medium"
 #      (per NSUL the postcode contains exactly one UPRN, so a row carrying
 #      that postcode can only be that property)
@@ -28,7 +32,11 @@ lookup_dedupe <- function(lookup) {
   lookup[!lookup$key %in% ambiguous, ]
 }
 
-build_epc_lookup <- function(uprn_historical_epc_lr) {
+# dec_addresses (optional): DEC first-address-lines with NSUL postcodes
+# attached (see epc_addresses.R) - covers public buildings that hold a DEC
+# but no EPC. Same key construction as the EPC entries, so a hit is the
+# same "address line + postcode agree" evidence and shares quality "high".
+build_epc_lookup <- function(uprn_historical_epc_lr, dec_addresses = NULL) {
   dom <- uprn_historical_epc_lr$domestic
   nondom <- uprn_historical_epc_lr$nondomestic
 
@@ -44,6 +52,14 @@ build_epc_lookup <- function(uprn_historical_epc_lr) {
       match_source = "epc_nondomestic"
     )
   )
+  if (!is.null(dec_addresses) && nrow(dec_addresses) > 0) {
+    lookup <- dplyr::bind_rows(lookup, data.frame(
+      key = normalise_match_key(dec_addresses$addr, dec_addresses$postcode),
+      UPRN = dec_addresses$UPRN,
+      LATITUDE = dec_addresses$LATITUDE, LONGITUDE = dec_addresses$LONGITUDE,
+      match_source = "dec"
+    ))
+  }
   lookup_dedupe(lookup)
 }
 
@@ -60,7 +76,8 @@ build_price_paid_lookup <- function(house_price_lr_uprn) {
 # (postcode, building name) for addresses that start with a name rather
 # than a number ("Ivy Cottage, Ackton Lane") - previously these could never
 # free-match at all.
-build_building_lookup <- function(uprn_historical_epc_lr, house_price_lr_uprn) {
+build_building_lookup <- function(uprn_historical_epc_lr, house_price_lr_uprn,
+                                  dec_addresses = NULL) {
   dom <- uprn_historical_epc_lr$domestic
   nondom <- uprn_historical_epc_lr$nondomestic
   hp <- house_price_lr_uprn[!is.na(house_price_lr_uprn$uprn), ]
@@ -82,6 +99,14 @@ build_building_lookup <- function(uprn_historical_epc_lr, house_price_lr_uprn) {
       match_source = "price_paid_building"
     )
   )
+  if (!is.null(dec_addresses) && nrow(dec_addresses) > 0) {
+    lookup <- dplyr::bind_rows(lookup, data.frame(
+      key = normalise_building_key(dec_addresses$addr, dec_addresses$postcode),
+      UPRN = dec_addresses$UPRN,
+      LATITUDE = dec_addresses$LATITUDE, LONGITUDE = dec_addresses$LONGITUDE,
+      match_source = "dec_building"
+    ))
+  }
   lookup_dedupe(lookup)
 }
 
@@ -186,8 +211,10 @@ match_free_sources <- function(needs_geocode, epc_lookup, price_paid_lookup,
                                building_lookup = NULL,
                                street_lookup = NULL,
                                infill_lookup = NULL,
+                               substation_lookup = NULL,
                                postcode_singleton_lookup = NULL,
-                               street_centroid_lookup = NULL) {
+                               street_centroid_lookup = NULL,
+                               street_centroid_postcode_lookup = NULL) {
   orig_cols <- names(needs_geocode)
   rem <- needs_geocode
 
@@ -199,6 +226,25 @@ match_free_sources <- function(needs_geocode, epc_lookup, price_paid_lookup,
       extract_street_name(df$AddressLine),
       df$District
     )
+  }
+  # substation titles never carry a house number, so street_number_key()
+  # (which requires one) doesn't apply - same (district, first-segment) key
+  # style as the street-centroid fallback below. Gated by
+  # is_substation_address() (substations.R) so an ordinary title sharing a
+  # street with a substation can never inherit its UPRN.
+  sub_key <- function(df, only_district = FALSE) {
+    is_sub <- is_substation_address(df$AddressLine)
+    district <- normalise_name(df$District)
+    if (only_district) {
+      k <- district
+      k[is.na(district)] <- NA_character_
+    } else {
+      seg <- normalise_name(stringr::str_extract(df$AddressLine, "^[^,]+"))
+      k <- paste(district, seg, sep = "|")
+      k[is.na(district) | is.na(seg)] <- NA_character_
+    }
+    k[!is_sub] <- NA_character_
+    k
   }
 
   matched <- list()
@@ -212,13 +258,34 @@ match_free_sources <- function(needs_geocode, epc_lookup, price_paid_lookup,
   rem <- run(rem, num_key(rem), price_paid_lookup, "high")
   rem <- run(rem, bld_key(rem), building_lookup, "high")
   rem <- run(rem, str_key(rem), street_lookup, "medium")
+  # substation-specific: (district, street) first, then the coarser
+  # district-singleton fallback - quality carried per-row (see
+  # build_substation_lookup() in substations.R)
+  rem <- run(rem, sub_key(rem), substation_lookup, NA_character_)
+  rem <- run(rem, sub_key(rem, only_district = TRUE), substation_lookup, NA_character_)
   rem <- run(rem, num_key(rem), infill_lookup, NA_character_) # quality carried per-row
   rem <- run(rem, str_key(rem), infill_lookup, NA_character_)
   # NSUL-based: the postcode truly contains one UPRN, so "medium" not "low"
   rem <- run(rem, normalise_postcode(rem$PostalCode), postcode_singleton_lookup, "medium")
 
-  # street-centroid fallback: only rows with NO house number (a numbered
-  # address deserves a real geocode, not a street midpoint)
+  # street-centroid fallbacks: only rows with NO house number (a numbered
+  # address deserves a real geocode, not a street midpoint). Postcode-scoped
+  # is tried first - it's finer-grained and immune to the LR `District`
+  # field occasionally disagreeing with the postal geography (see
+  # build_street_centroid_postcode_lookup()); the district version then
+  # mops up postcode-less rows (nopc_land titles have no postcode at all).
+  if (!is.null(street_centroid_postcode_lookup) && nrow(street_centroid_postcode_lookup) > 0 && nrow(rem) > 0) {
+    seg <- normalise_name(stringr::str_extract(rem$AddressLine, "^[^,]+"))
+    pckey <- paste(normalise_postcode(rem$PostalCode), seg, sep = "|")
+    pckey[is.na(rem$PostalCode) | is.na(seg)] <- NA_character_
+    pckey[!is.na(extract_house_number(rem$AddressLine))] <- NA_character_
+    cl <- street_centroid_postcode_lookup
+    cl$UPRN <- NA_real_
+    cl$match_source <- "usrn_street_centroid_postcode"
+    st <- match_stage(rem, pckey, cl, "street")
+    matched[[length(matched) + 1]] <- st$matched
+    rem <- st$remaining
+  }
   if (!is.null(street_centroid_lookup) && nrow(street_centroid_lookup) > 0 && nrow(rem) > 0) {
     seg <- normalise_name(stringr::str_extract(rem$AddressLine, "^[^,]+"))
     ckey <- paste(normalise_name(rem$District), seg, sep = "|")

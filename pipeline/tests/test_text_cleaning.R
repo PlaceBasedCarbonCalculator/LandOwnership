@@ -26,6 +26,7 @@ source("pipeline/R/utils.R")
 source("pipeline/R/geocode_queue.R")
 source("pipeline/R/uprn_infill.R")
 source("pipeline/R/match_free_sources.R")
+source("pipeline/R/substations.R")
 
 check <- function(label, cond) {
   if (!isTRUE(cond)) stop("FAILED: ", label, call. = FALSE)
@@ -308,5 +309,81 @@ check("osm tag: housenumber", extract_osm_tag(tags, "addr:housenumber") == "28")
 check("osm tag: street", extract_osm_tag(tags, "addr:street") == "Ridge Way")
 check("osm tag: missing key is NA", is.na(extract_osm_tag(tags, "addr:unit")))
 cat("extract_osm_tag: OK\n")
+
+# --- is_substation_address / broadened clean_spelling (substations.R) -------
+check("substation detect: plain word", is_substation_address("Electricity Substation, Long Lane"))
+check("substation detect: hyphenated no article", is_substation_address("The Sub-Station, Field Lane"))
+check("substation detect: spaced plural", is_substation_address("Electricity Sub Stations, Field Lane"))
+check("substation detect: negative", !is_substation_address("12 High Street, Leeds"))
+check("substation detect: NA-safe", !is_substation_address(NA_character_))
+
+check(
+  "clean_spelling: bare 'Sub Station' now normalised (no article required)",
+  clean_spelling("Sub Station, Field Lane") == "substation, Field Lane"
+)
+check(
+  "clean_spelling: 'the electricity sub-station' normalised",
+  clean_spelling("the electricity sub-station, Field Lane") == "substation, Field Lane"
+)
+check(
+  "clean_spelling: plural normalised",
+  clean_spelling("electricity sub-stations, Field Lane") == "substation, Field Lane"
+)
+cat("is_substation_address / clean_spelling substation variants: OK\n")
+
+# --- build_substation_uprn_lookup (synthetic OSM + UPRN points, EPSG:27700) --
+mk_poly <- function(x0, y0, x1, y1) {
+  sf::st_polygon(list(matrix(c(x0, y0, x1, y0, x1, y1, x0, y1, x0, y0), ncol = 2, byrow = TRUE)))
+}
+osm_poly_syn <- sf::st_sf(
+  osm_id = "p1", name = "Compound A",
+  geometry = sf::st_sfc(mk_poly(0, 0, 10, 10), crs = 27700)
+)
+osm_pts_syn <- sf::st_sf(
+  osm_id = c("n1", "n2"), name = c("Node A", "Node B"),
+  geometry = sf::st_sfc(
+    sf::st_point(c(100, 100)), sf::st_point(c(200, 200)),
+    crs = 27700
+  )
+)
+uprn_hist_syn <- data.frame(
+  UPRN = c(10, 20, 21, 22),
+  LATITUDE = c(53, 53, 53, 53), LONGITUDE = c(-1, -1, -1, -1),
+  X_COORDINATE = c(5, 105, 205, 206), Y_COORDINATE = c(5, 100, 200, 200)
+)
+sub_uprn <- build_substation_uprn_lookup(osm_pts_syn, osm_poly_syn, uprn_hist_syn, point_tolerance_m = 20)
+check("substation uprn: UPRN inside compound matched", 10 %in% sub_uprn$UPRN)
+check("substation uprn: unambiguous nearby node matched", 20 %in% sub_uprn$UPRN)
+check("substation uprn: two equally-near UPRNs -> ambiguous, dropped", !21 %in% sub_uprn$UPRN && !22 %in% sub_uprn$UPRN)
+cat("build_substation_uprn_lookup: OK\n")
+
+# --- build_substation_lookup (synthetic crosswalk) ---------------------------
+sub_uprn_syn <- data.frame(
+  UPRN = c(1, 2, 3, 4), osm_id = c("a", "b", "c", "d"),
+  name = c("Sub A", "Sub B", "Sub C", "Sub D"),
+  LATITUDE = c(53, 54, 55, 56), LONGITUDE = c(-1, -2, -3, -4)
+)
+uprn_places_syn <- data.frame(
+  UPRN = c(1, 2, 3, 4),
+  postcode = c("LS61RN", "WF76HP", "XX00XX", "LS62AB"),
+  district = c("LEEDS", "WAKEFIELD", "SOMEWHERE", "LEEDS") # 1 & 4 share a district
+)
+uprn_usrn_syn <- data.frame(UPRN = c(1), USRN = c(100)) # only UPRN 1 has a USRN link
+usrn_street_names_syn <- data.frame(USRN = c(100), street = c("Fake Street"))
+
+sl <- build_substation_lookup(sub_uprn_syn, uprn_places_syn, uprn_usrn_syn, usrn_street_names_syn)
+check(
+  "substation lookup: street key for UPRN on a named USRN",
+  any(sl$key == "LEEDS|FAKE STREET" & sl$UPRN == 1 & sl$match_quality == "medium")
+)
+check(
+  "substation lookup: district-singleton fallback for a genuinely unique district",
+  any(sl$key == "WAKEFIELD" & sl$UPRN == 2 & sl$match_quality == "low")
+)
+check(
+  "substation lookup: district shared by two substation UPRNs is NOT a singleton",
+  !"LEEDS" %in% sl$key
+)
+cat("build_substation_lookup: OK\n")
 
 cat("\nAll tests passed.\n")

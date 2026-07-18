@@ -4,27 +4,17 @@
 # so behaviour doesn't silently drift.
 postcode_rx <- "\\b(?:[A-Za-z][A-HJ-Ya-hj-y]?[0-9][0-9A-Za-z]? ?[0-9][A-Za-z]{2}|[Gg][Ii][Rr] ?0[Aa]{2})\\b"
 
-# Optional row cap applied by the raw importers when
-# options(pipeline.sample_n = <n>) is set, so the pipeline can be smoke
-# tested end-to-end in minutes instead of hours. Leave unset for full runs.
-pipeline_sample_n <- function() {
-  getOption("pipeline.sample_n", default = NA_integer_)
-}
-
-# Separate, smaller cap for load_inspire_clean() (options(pipeline.sample_zips
-# = <n>)): INSPIRE's per-LA grid-merge cleaning is slow enough that even a
-# "sample_n rows" -sized cap on the number of LA zips processed would still
-# be too slow for a quick smoke test.
-pipeline_sample_zips <- function() {
-  getOption("pipeline.sample_zips", default = NA_integer_)
-}
-
-sample_rows <- function(df) {
-  n <- pipeline_sample_n()
-  if (is.na(n) || nrow(df) <= n) {
-    return(df)
-  }
-  df[seq_len(n), ]
+# Anchored version of postcode_rx: TRUE only when the ENTIRE (trimmed)
+# string is a well-formed UK postcode, not merely contains one somewhere
+# inside a longer string (that's what postcode_rx itself is for - see
+# classify_geocodability(), split_multi_postcode()). Used by the
+# coverage-audit checks in audit_uprn_coverage.R to flag missing or
+# malformed postcode values (PostalCode, NSUL PCDS, ...) as a count instead
+# of only surfacing as a silent match failure several stages downstream.
+postcode_rx_full <- "^(?:[A-Za-z][A-HJ-Ya-hj-y]?[0-9][0-9A-Za-z]? ?[0-9][A-Za-z]{2}|[Gg][Ii][Rr] ?0[Aa]{2})$"
+is_valid_postcode <- function(x) {
+  x <- trimws(x)
+  !is.na(x) & x != "" & grepl(postcode_rx_full, x)
 }
 
 # Split a `Property Address` column at postcode boundaries so a title with
@@ -33,6 +23,10 @@ sample_rows <- function(df) {
 # "walk the postcode match positions, cut the string between them" logic
 # that was previously duplicated near-verbatim in prep_address_mulitple_postcode.R,
 # prep_oversees_owners.R, prep_land_postcode.R and prep_UK_leashold_owners.R.
+# The per-row cut-and-rebuild is independent row to row, so it runs under
+# furrr::future_map() - relies on the caller (build_split_addresses()) having
+# set a future::plan(); falls back to sequential (identical to the old
+# for-loop) if none is set.
 split_multi_postcode <- function(df, address_col = "Property Address") {
   if (nrow(df) == 0) {
     df$AddressLine <- character(0)
@@ -43,8 +37,7 @@ split_multi_postcode <- function(df, address_col = "Property Address") {
   split_locs <- stringr::str_locate_all(df[[address_col]], postcode_rx)
   df_list <- split(df, seq_len(nrow(df)))
 
-  res <- vector("list", length(df_list))
-  for (i in seq_along(df_list)) {
+  res <- furrr::future_map(seq_along(df_list), function(i) {
     df_sub <- df_list[[i]]
     split_sub <- split_locs[[i]]
     breaks <- c(split_sub[seq(1, nrow(split_sub) - 1), 2], nchar(df_sub[[address_col]]))
@@ -59,8 +52,8 @@ split_multi_postcode <- function(df, address_col = "Property Address") {
     df2 <- df_sub[rep(1, times = length(pa)), ]
     df2$AddressLine <- pa
     df2$PostalCode <- stringr::str_match(df2$AddressLine, postcode_rx)[, 1]
-    res[[i]] <- df2
-  }
+    df2
+  })
 
   res <- dplyr::bind_rows(res)
 
@@ -111,14 +104,25 @@ extract_house_number <- function(address) {
   toupper(stringr::str_extract(address, "^[0-9]+[A-Za-z]?\\b"))
 }
 
-# Street name from a "22 Acacia Avenue" style first address segment. Only
-# trusted when the segment starts with a house number (otherwise the
-# segment is a building/estate name, not a street). Returns NA otherwise.
+# Street name from a "22 Acacia Avenue" or "22, Acacia Avenue" style leading
+# address segment. Only trusted when the address starts with a house number
+# (otherwise it's a building/estate name, not a street). Returns NA
+# otherwise. EPC/Price-Paid addresses very often put a comma directly after
+# the house number ("6, Leyfield Road") - if the first comma-delimited
+# segment turns out to be nothing but that number, the street name is
+# actually the NEXT segment, not an empty string.
 extract_street_name <- function(address) {
   seg <- stringr::str_extract(address, "^[^,]+")
   has_number <- grepl("^\\s*[0-9]+[A-Za-z]?\\b", seg)
   street <- sub("^\\s*[0-9]+[A-Za-z]?\\b[\\s,]*", "", seg, perl = TRUE)
   street <- stringr::str_squish(street)
+
+  bare_number_seg <- has_number & !is.na(street) & street == ""
+  if (any(bare_number_seg)) {
+    next_seg <- stringr::str_match(address, "^[^,]+,\\s*([^,]+)")[, 2]
+    street[bare_number_seg] <- stringr::str_squish(next_seg[bare_number_seg])
+  }
+
   street[!has_number | is.na(street) | nchar(street) < 4] <- NA_character_
   street
 }
@@ -179,6 +183,16 @@ final_address_tidy <- function(x) {
   ci <- stringi::stri_opts_regex(case_insensitive = TRUE)
   x <- stringi::stri_replace_all_regex(x, "@[A-Za-z]+", " ")
   x <- stringi::stri_replace_all_regex(x, "\\(\\s*\\)", " ")
+  # a stray unmatched bracket, e.g. "10 Sunnydene, )" - happens when the
+  # source register text itself has a mismatched paren next to a postcode
+  # ("...Sunnydene, )LS14 6AL)..." is a genuine CCOD/OCOD typo) and the
+  # postcode-boundary split in split_multi_postcode() cuts right through it,
+  # leaving the orphan bracket on one side.
+  unbalanced <- stringi::stri_count_fixed(x, "(") != stringi::stri_count_fixed(x, ")")
+  unbalanced[is.na(unbalanced)] <- FALSE
+  x[unbalanced] <- stringi::stri_replace_all_regex(
+    x[unbalanced], "^[\\s,;]*\\(+|\\)+[\\s,;]*$", ""
+  )
   # runs of commas/semicolons left behind by phrase removal
   x <- stringi::stri_replace_all_regex(x, "\\s*[,;]\\s*(?=[,;])", "")
   glue_rx <- paste0(

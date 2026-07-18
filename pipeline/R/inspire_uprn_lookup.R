@@ -24,14 +24,8 @@
 
 # Reads every INSPIRE zip in `path` (one per Local Authority) and returns
 # cleaned polygons with `local_authority`, `INSPIREID`, `area` (m2).
-# When options(pipeline.sample_n = <n>) is set, only the first `n` zips are
-# processed (INSPIRE cleaning is slow - this is for smoke-testing).
 load_inspire_clean <- function(path, workers = NULL) {
   zips <- list.files(path, pattern = "\\.zip$", full.names = TRUE)
-  sample_n <- pipeline_sample_zips()
-  if (!is.na(sample_n)) {
-    zips <- utils::head(zips, sample_n)
-  }
 
   if (is.null(workers)) {
     workers <- min(8, max(1, future::availableCores() - 1))
@@ -174,7 +168,30 @@ clean_inspire_la <- function(zip_path) {
 
   poly_new$area <- round(as.numeric(sf::st_area(poly_new)))
   poly_new <- sf::st_make_valid(poly_new)
-  poly_new[!sf::st_is_empty(poly_new), ]
+  poly_new <- poly_new[!sf::st_is_empty(poly_new), ]
+
+  # st_make_valid() can turn a POLYGON into a GEOMETRYCOLLECTION (a repaired
+  # self-intersection leaves a stray line/point next to the polygon). Only in
+  # that case extract the polygonal parts back out - checked conditionally so
+  # the vast majority of LAs with no collections pay nothing.
+  if (any(sf::st_geometry_type(poly_new) == "GEOMETRYCOLLECTION")) {
+    poly_new <- sf::st_collection_extract(poly_new, "POLYGON", warn = FALSE)
+    poly_new <- poly_new[!sf::st_is_empty(poly_new), ]
+  }
+
+  # Different LAs end up with different sfc subclasses on the geometry column
+  # (sfc_POLYGON / sfc_MULTIPOLYGON / sfc_GEOMETRY), which makes the cross-LA
+  # rbindlist() in load_inspire_clean() fail with "Class attribute on column 4
+  # ... does not match". We don't need to convert the geometries to fix this -
+  # st_cast(, "MULTIPOLYGON") rebuilds every vertex and is very slow at this
+  # scale. rbindlist() only compares the column's *class attribute*, so
+  # relabelling the sfc to the generic sfc_GEOMETRY (an O(1) attribute change)
+  # is enough to homogenise the bind. The per-feature geometry types are
+  # untouched, and sfc_GEOMETRY is the same type sf produces for any mixed
+  # collection - downstream st_transform/st_within/st_join handle it directly.
+  geom_col <- attr(poly_new, "sf_column")
+  class(poly_new[[geom_col]]) <- c("sfc_GEOMETRY", "sfc")
+  poly_new
 }
 
 # Spatial-join OS Open UPRN points (native BNG, from uprn_historical) into

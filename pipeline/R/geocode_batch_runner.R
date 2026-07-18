@@ -12,13 +12,18 @@
 # retired Bing API's 50,000/day, so this is designed to be called in small
 # batches spread over time rather than run to completion in one sitting.
 
+# Pass `uprn_historical` (e.g. targets::tar_read(uprn_historical)) to
+# run infer_flat_locations() automatically after the batch, so deferred
+# flats are filled in from any building representatives just geocoded (see
+# pipeline/R/geocode_flat_infer.R - no extra Azure spend).
 run_geocode_batch <- function(n,
                                confirm = FALSE,
                                monthly_cap = 5000,
                                force = FALSE,
                                queue_path = "data/geocoding/queue.rds",
                                results_path = "data/geocoding/azure_results.rds",
-                               usage_log_path = "logs/azure_usage_log.csv") {
+                               usage_log_path = "logs/azure_usage_log.csv",
+                               uprn_historical = NULL) {
   if (!isTRUE(confirm)) {
     stop(
       "run_geocode_batch() refuses to run without confirm = TRUE. ",
@@ -105,6 +110,12 @@ run_geocode_batch <- function(n,
   )
 
   message("Done. ", sum(batch$status == "done"), "/", nrow(batch), " succeeded.")
+
+  if (!is.null(uprn_historical)) {
+    infer_flat_locations(uprn_historical,
+      queue_path = queue_path, results_path = results_path
+    )
+  }
   invisible(new_results)
 }
 

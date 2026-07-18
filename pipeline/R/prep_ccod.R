@@ -42,8 +42,7 @@ import_ccod_raw <- function(zip_path) {
 
   lr <- lr[, ccod_columns]
   lr <- lr[!is.na(lr$`Title Number`), ]
-  lr <- lr[!duplicated(lr$`Title Number`), ] # CCOD titles are one row each; guard anyway
-  sample_rows(lr)
+  lr[!duplicated(lr$`Title Number`), ] # CCOD titles are one row each; guard anyway
 }
 
 # Categorise freehold titles by how hard they'll be to geocode, mirroring

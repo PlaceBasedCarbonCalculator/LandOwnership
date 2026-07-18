@@ -27,8 +27,7 @@ import_ocod_raw <- function(zip_path) {
 
   lr <- lr[, ocod_columns]
   lr <- lr[!is.na(lr$`Title Number`), ]
-  lr <- lr[!duplicated(lr$`Title Number`), ]
-  sample_rows(lr)
+  lr[!duplicated(lr$`Title Number`), ]
 }
 
 # Unlike CCOD freehold, OCOD isn't split into short/long/land/nopc

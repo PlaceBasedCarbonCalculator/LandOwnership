@@ -170,10 +170,15 @@ clean_spelling <- function(x){
                                        pattern =  spell_situated,
                                        replacement = "situated", 
                                        opts_regex = stringi::stri_opts_regex(case_insensitive = TRUE))
-  spell_substation <- c("\\ba sub-station\\b",
-                        "\\ba sub station\\b",
-                        "\\ban electricity sub station\\b",
-                        "\\ban electricity sub-station\\b")
+  # Broadened July 2026 (substation OSM/UPRN matching work): the original
+  # list only fired when "sub station"/"sub-station" was preceded by "a"/
+  # "an" - bare "Sub Station", "the electricity sub-station" and plurals
+  # ("sub-stations") all fell through uncleaned. Not anchored to
+  # "electricity" or an article any more; still normalises to the singular
+  # "substation" so it matches the literal removal phrases already in
+  # data/clean_strings.xlsx / data/long_strings.xlsx.
+  spell_substation <- c("\\b(the |an? )?electricity sub[- ]?stations?\\b",
+                        "\\b(the |an? )?sub[- ]?stations?\\b")
   spell_substation <- paste0("(",paste(spell_substation, collapse = ")|("),")")
   x <- stringi::stri_replace_all_regex(str = x, 
                                        pattern =  spell_substation,

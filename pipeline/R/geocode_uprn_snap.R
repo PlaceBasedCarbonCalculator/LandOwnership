@@ -31,5 +31,12 @@ snap_geocoded_to_uprn <- function(azure_results, uprn_historical, tolerance_m = 
 
   out <- sf::st_drop_geometry(pts)
   out$source <- ifelse(is.na(out$UPRN), "azure_geocoded", "azure_geocoded_uprn_snap")
+  # rows whose location was copied from a flat group's representative (see
+  # pipeline/R/geocode_flat_infer.R) carry that provenance through - they
+  # all share the rep's point, so the snapped UPRN is the building's, not
+  # the individual flat's
+  if ("inferred_from" %in% names(out)) {
+    out$source[!is.na(out$inferred_from)] <- "azure_geocoded_flat_inferred"
+  }
   out
 }

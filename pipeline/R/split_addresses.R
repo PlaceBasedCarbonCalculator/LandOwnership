@@ -24,12 +24,18 @@ source("R/text_cleaning.R")
 # individual property (e.g. "10-14 Example Street" -> 3 rows). Rows that
 # fail to parse (split_numbers_try() returns NULL) are dropped - they still
 # exist in the pre-split categorised data if anyone wants to inspect them.
+# split_numbers_try() is a pure per-row function (its own try/catch, no
+# shared state), and this runs it over up to ~2M rows - a textbook
+# furrr::future_map() candidate. Relies on the caller (build_split_addresses())
+# having already set a `future::plan()`; falls back to sequential (identical
+# to the old purrr::map()) if none is set, so this is still safe to call on
+# its own outside the pipeline.
 split_and_explode <- function(df, address_col = "AddressLine") {
   if (nrow(df) == 0) {
     df$AddressLine <- character(0)
     return(df)
   }
-  addr_list <- purrr::map(df[[address_col]], split_numbers_try)
+  addr_list <- furrr::future_map(df[[address_col]], split_numbers_try)
   reps <- lengths(addr_list)
   out <- df[rep(seq_len(nrow(df)), times = reps), ]
   out$AddressLine <- unlist(addr_list)
@@ -54,14 +60,24 @@ clean_boilerplate_address <- function(x, text_rem, long_text_rem = NULL) {
 }
 
 # Freehold-no-postcode titles that are substations or "part of" descriptions
-# aren't geocodable from the address text alone - set aside as `nopc_complex`
-# rather than fed through split_numbers_try (mirrors prep_address_no_postcode.R).
+# aren't geocodable from a bare AddressLine the way nopc_simple titles are -
+# set aside from split_numbers_try (mirrors prep_address_no_postcode.R).
+# Substations get their own bucket: unlike "part of ..." titles (still
+# hopeless without a coordinate - see `other_complex`), a substation can be
+# resolved via OSM/UPRN matching (see pipeline/R/substations.R), so it's
+# routed through the ordinary boilerplate-stripping pipeline instead of
+# being dropped outright.
 split_nopc_complex <- function(df) {
   is_complex <- grepl("substation|sub-station|sub station|part of",
     df$`Property Address`,
     ignore.case = TRUE
   )
-  list(simple = df[!is_complex, ], complex = df[is_complex, ])
+  is_sub <- is_complex & is_substation_address(df$`Property Address`)
+  list(
+    simple = df[!is_complex, ],
+    substation = df[is_sub, ],
+    other_complex = df[is_complex & !is_sub, ]
+  )
 }
 
 finish_boilerplate <- function(df, text_rem, long_text_rem = NULL) {
@@ -92,7 +108,7 @@ finish_boilerplate <- function(df, text_rem, long_text_rem = NULL) {
 # Top-level orchestrator: takes the bound-together categorised CCOD
 # freehold + leasehold + OCOD rows (see prep_ccod.R / prep_ocod.R) and
 # returns one row per property, ready for diffing/matching/geocoding.
-build_split_addresses <- function(categorised, text_rem, long_text_rem = NULL) {
+build_split_addresses <- function(categorised, text_rem, long_text_rem = NULL, workers = NULL) {
   # `orig_row_id` (added to the `all_categorised` target itself, see
   # _targets.R) is preserved through every rep()/bind_rows() below so
   # audit_cleaning.R can compare back to the pre-split data and see exactly
@@ -103,10 +119,25 @@ build_split_addresses <- function(categorised, text_rem, long_text_rem = NULL) {
     categorised$orig_row_id <- seq_len(nrow(categorised))
   }
 
+  # split_and_explode() (per-row split_numbers_try()) and split_multi_postcode()
+  # (per-row postcode-boundary cut) below both run over up to ~2M rows one R
+  # function call at a time - the dominant cost of this stage. Both are pure,
+  # independent per-row work, so a multisession plan set once here (same
+  # convention as load_inspire_clean() in inspire_uprn_lookup.R) parallelises
+  # every call below without paying repeated cluster start-up cost.
+  if (is.null(workers)) {
+    workers <- min(8, max(1, future::availableCores() - 1))
+  }
+  future::plan("multisession", workers = workers)
+  on.exit(future::plan("sequential"), add = TRUE)
+
   nopc_rows <- categorised[categorised$category == "nopc", ]
   nopc_split <- split_nopc_complex(nopc_rows)
-  nopc_complex <- nopc_split$complex
+  nopc_complex <- nopc_split$other_complex
+  nopc_complex$category <- "nopc_complex" # was silently left as "nopc" - audit_cleaning.R counts this category explicitly
   nopc_simple <- nopc_split$simple
+  nopc_substation <- nopc_split$substation
+  nopc_substation$category <- "nopc_substation"
   # nopc titles have no postcode, so the address text is all the geocoder
   # gets - give them the light-touch spelling pass (the heavier boilerplate
   # lists stay boilerplate-category-only); leading glue like "the site of"
@@ -139,7 +170,14 @@ build_split_addresses <- function(categorised, text_rem, long_text_rem = NULL) {
 
   boilerplate_categories <- c("land_pc", "nopc_land", "leasehold", "overseas")
   boilerplate_df <- categorised[categorised$category %in% boilerplate_categories, ]
-  long_boilerplate <- boilerplate_df[boilerplate_df$category == "nopc_land", ]
+  # nopc_substation shares nopc_land's shape (freehold, no postcode) and its
+  # boilerplate is often the same easement/equipment legalese (see
+  # data/long_strings.xlsx), so it gets the same long_text_rem treatment
+  # rather than a separate finish_boilerplate() call.
+  long_boilerplate <- dplyr::bind_rows(
+    boilerplate_df[boilerplate_df$category == "nopc_land", ],
+    nopc_substation
+  )
   other_boilerplate <- boilerplate_df[boilerplate_df$category != "nopc_land", ]
 
   boilerplate_result <- dplyr::bind_rows(
