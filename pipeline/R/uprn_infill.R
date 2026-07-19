@@ -561,57 +561,22 @@ build_usrn_street_names <- function(uprn_usrn, known_uprn_addresses, postcode_di
 # The infill itself
 # ---------------------------------------------------------------------------
 
-# Gap-guess house numbers for unknown UPRNs. For each street: take the
-# known, numeric-numbered UPRNs, split by odd/even (UK convention: one
-# parity per side), order everything along the street's principal axis, and
-# wherever two consecutive known numbers differ by exactly 4 (one missing
-# house) with exactly ONE unknown UPRN projected between them on the same
-# side of the street, guess the midpoint number. Requirements:
-#   - neighbours < 150m apart along the axis (genuinely adjacent),
-#   - unknown within 12m of the known pair's side-offset (same side of the
-#     street: opposite frontages are usually 15m+ apart and carry the other
-#     parity, so a loose tolerance would guess even numbers for odd-side
-#     houses),
-#   - unknown within 75m of the USRN centreline (LIDS link and coordinate
-#     agree),
-#   - both neighbours in the same postcode (inherited by the guess).
-#
-# Runs one street at a time, in parallel via furrr::future_map() (relies on
-# the caller having set a future::plan(); falls back to sequential if none
-# is set - identical to the old for-loop). Progress is reported with
-# progressr rather than utils::txtProgressBar: a txtProgressBar can only be
-# updated from the process that created it, which breaks the moment the
-# work is spread across multisession worker processes - progressr's
-# progressor() is designed to signal back to the main process from workers.
-guess_gap_numbers <- function(unknown_on_usrn, known_on_usrn, usrn_geom, progress = TRUE) {
-  # pre-filter to streets that can possibly yield a guess (an unknown UPRN
-  # plus two known same-parity numbers exactly 4 apart) - this cuts the
-  # per-street loop from every street in Britain to a small candidate set
-  kn_dt <- data.table::as.data.table(known_on_usrn)
-  kn_dt[, num := suppressWarnings(as.numeric(gsub("[A-Za-z]", "", house_number)))]
-  kn_dt <- kn_dt[!is.na(num)]
-  gap_usrns <- kn_dt[, {
-    n <- sort(unique(num))
-    list(has_gap = any(diff(n[n %% 2 == 0]) == 4) | any(diff(n[n %% 2 == 1]) == 4))
-  }, by = USRN]
-  gap_usrns <- gap_usrns$USRN[gap_usrns$has_gap]
-
-  usrns <- intersect(unique(unknown_on_usrn$USRN), gap_usrns)
-  if (length(usrns) == 0) {
-    return(data.frame())
-  }
-
-  known_split <- split(known_on_usrn[known_on_usrn$USRN %in% usrns, ],
-                       known_on_usrn$USRN[known_on_usrn$USRN %in% usrns])
-  unknown_split <- split(unknown_on_usrn[unknown_on_usrn$USRN %in% usrns, ],
-                         unknown_on_usrn$USRN[unknown_on_usrn$USRN %in% usrns])
-  street_ids <- names(known_split)
-
+# Factory for guess_one_street(), the per-street worker used by
+# guess_gap_numbers() below. Defined at file scope (NOT nested inside
+# guess_gap_numbers) deliberately: a closure's exported size includes its
+# entire lexical parent chain, not just its own call frame, so a nested
+# factory would still drag guess_gap_numbers()'s full argument set
+# (known_on_usrn/unknown_on_usrn, unfiltered, tens of GiB) along via the
+# parent link even though only known_split/unknown_split are referenced.
+# Defining it here instead gives guess_one_street's parent environment as
+# this file's top level, so future/furrr only exports known_split and
+# unknown_split - not everything else guess_gap_numbers happens to hold.
+make_guess_one_street <- function(known_split, unknown_split) {
   # One street's worth of gap-guessing - the unit of parallel work. Returns
   # a data.frame (0-row if the street yields no guesses) instead of
   # appending to a shared list, since streets are now computed independently
   # of each other, possibly on different worker processes.
-  guess_one_street <- function(u) {
+  function(u) {
     kn <- known_split[[u]]
     un <- unknown_split[[u]]
     if (is.null(un) || nrow(un) == 0 || nrow(kn) < 2) {
@@ -673,6 +638,57 @@ guess_gap_numbers <- function(unknown_on_usrn, known_on_usrn, usrn_geom, progres
     }
     dplyr::bind_rows(street_guesses)
   }
+}
+
+# Gap-guess house numbers for unknown UPRNs. For each street: take the
+# known, numeric-numbered UPRNs, split by odd/even (UK convention: one
+# parity per side), order everything along the street's principal axis, and
+# wherever two consecutive known numbers differ by exactly 4 (one missing
+# house) with exactly ONE unknown UPRN projected between them on the same
+# side of the street, guess the midpoint number. Requirements:
+#   - neighbours < 150m apart along the axis (genuinely adjacent),
+#   - unknown within 12m of the known pair's side-offset (same side of the
+#     street: opposite frontages are usually 15m+ apart and carry the other
+#     parity, so a loose tolerance would guess even numbers for odd-side
+#     houses),
+#   - unknown within 75m of the USRN centreline (LIDS link and coordinate
+#     agree),
+#   - both neighbours in the same postcode (inherited by the guess).
+#
+# Runs one street at a time, in parallel via furrr::future_map() (relies on
+# the caller having set a future::plan(); falls back to sequential if none
+# is set - identical to the old for-loop). Progress is reported with
+# progressr rather than utils::txtProgressBar: a txtProgressBar can only be
+# updated from the process that created it, which breaks the moment the
+# work is spread across multisession worker processes - progressr's
+# progressor() is designed to signal back to the main process from workers.
+guess_gap_numbers <- function(unknown_on_usrn, known_on_usrn, usrn_geom, progress = TRUE) {
+  # pre-filter to streets that can possibly yield a guess (an unknown UPRN
+  # plus two known same-parity numbers exactly 4 apart) - this cuts the
+  # per-street loop from every street in Britain to a small candidate set
+  kn_dt <- data.table::as.data.table(known_on_usrn)
+  kn_dt[, num := suppressWarnings(as.numeric(gsub("[A-Za-z]", "", house_number)))]
+  kn_dt <- kn_dt[!is.na(num)]
+  gap_usrns <- kn_dt[, {
+    n <- sort(unique(num))
+    list(has_gap = any(diff(n[n %% 2 == 0]) == 4) | any(diff(n[n %% 2 == 1]) == 4))
+  }, by = USRN]
+  gap_usrns <- gap_usrns$USRN[gap_usrns$has_gap]
+
+  usrns <- intersect(unique(unknown_on_usrn$USRN), gap_usrns)
+  if (length(usrns) == 0) {
+    return(data.frame())
+  }
+
+  known_split <- split(known_on_usrn[known_on_usrn$USRN %in% usrns, ],
+                       known_on_usrn$USRN[known_on_usrn$USRN %in% usrns])
+  unknown_split <- split(unknown_on_usrn[unknown_on_usrn$USRN %in% usrns, ],
+                         unknown_on_usrn$USRN[unknown_on_usrn$USRN %in% usrns])
+  street_ids <- names(known_split)
+
+  # see make_guess_one_street() above for why this is a file-scope factory
+  # rather than a closure defined directly in this frame
+  guess_one_street <- make_guess_one_street(known_split, unknown_split)
 
   progressr::with_progress(
     {
@@ -835,6 +851,12 @@ build_infill_gap_guess <- function(infill_un_usrn, known_uprn_addresses, uprn_us
   }
   future::plan("multisession", workers = workers)
   on.exit(future::plan("sequential"), add = TRUE)
+  # known_split/unknown_split (the per-street data every worker needs) can
+  # legitimately run to a couple of GiB, well past future's 500MiB default
+  # safety cap on exported globals - raise it just for this call.
+  old_max_size <- getOption("future.globals.maxSize")
+  options(future.globals.maxSize = 8 * 1024^3)
+  on.exit(options(future.globals.maxSize = old_max_size), add = TRUE)
 
   guesses <- guess_gap_numbers(
     unknown_on_usrn = infill_un_usrn[, c("UPRN", "USRN", "X_COORDINATE", "Y_COORDINATE")],
