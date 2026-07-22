@@ -54,9 +54,16 @@ run_geocode_batch <- function(n,
     return(invisible(NULL))
   }
   # postcode-bearing rows first: higher expected success per paid call
-  # (audit recommendation 11)
+  # (audit recommendation 11), then queue_priority (0 = normal, 1 =
+  # deprioritised - ambiguous street with no postcode, see
+  # flag_ambiguous_street() in geocode_queue.R). Older queue.rds files
+  # predating queue_priority default everything to 0 (no reordering).
   has_pc <- !is.na(pending$PostalCode) & pending$PostalCode != ""
-  pending <- pending[order(!has_pc), ]
+  if (!"queue_priority" %in% names(pending)) {
+    pending$queue_priority <- 0L
+  }
+  priority <- ifelse(is.na(pending$queue_priority), 0L, pending$queue_priority)
+  pending <- pending[order(!has_pc, priority), ]
   batch <- pending[seq_len(min(n, nrow(pending))), ]
 
   message(

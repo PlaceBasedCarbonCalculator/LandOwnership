@@ -59,6 +59,38 @@ audit_known_uprn_addresses <- function(known_uprn_addresses) {
   out
 }
 
+# Stage: direct OSM UPRN tagging (load_osm_uprn_tags(), osm_uprn.R) - how
+# many UPRNs OSM has tagged nationally via ref:gb:uprn (as a share of every
+# UPRN in uprn_historical), split by geometry type, and how many of those
+# tagged objects also carry enough addr:* tags to be usable as the
+# "osm_uprn_tag" source in known_uprn_addresses (build_osm_uprn_addresses()).
+audit_osm_uprn_tags <- function(osm_uprn_tags, uprn_historical) {
+  n_tagged <- nrow(osm_uprn_tags)
+  n_total <- nrow(uprn_historical)
+  n_with_address <- sum(
+    !is.na(osm_uprn_tags$osm_housenumber) & !is.na(osm_uprn_tags$osm_street)
+  )
+  n_poly <- sum(osm_uprn_tags$osm_geom_type == "polygon")
+
+  out <- data.frame(
+    n_uprn_total = n_total,
+    n_osm_tagged = n_tagged,
+    pct_osm_tagged = round(n_tagged / pmax(n_total, 1), 4),
+    n_osm_polygon = n_poly,
+    n_osm_point = n_tagged - n_poly,
+    n_osm_with_address = n_with_address,
+    pct_osm_with_address = round(n_with_address / pmax(n_tagged, 1), 4),
+    stringsAsFactors = FALSE
+  )
+  message(
+    n_tagged, " OSM objects carry a ref:gb:uprn tag (",
+    sprintf("%.1f%%", 100 * out$pct_osm_tagged), " of all UPRNs); ",
+    n_with_address, " (", sprintf("%.1f%%", 100 * out$pct_osm_with_address),
+    ") also carry a usable addr:housenumber + addr:street."
+  )
+  out
+}
+
 # Stage: USRN street naming (build_usrn_street_names()) - what fraction of
 # ALL USRNs an infill candidate could sit on (the uprn_usrn universe)
 # actually got a name, and how many of those also got a district/postcode.
@@ -160,6 +192,64 @@ audit_uprn_all_addresses <- function(uprn_all_addresses) {
     " remain completely unaddressed. ", out$n_postcode_valid, " of ",
     out$n_with_postcode, " present postcodes are well-formed ",
     "(", sprintf("%.2f%%", 100 * out$pct_postcode_malformed), " malformed)."
+  )
+  out
+}
+
+# Stage: fuzzy free-text matching (pipeline/R/fuzzy_match.R) - the last-resort
+# stage tried on rows every exact stage in match_free_sources() already
+# failed on. Reports how many of those rows it recovered and the similarity-
+# score distribution, in the same style as match_free_sources()'s own
+# "N of M addresses matched for free..." message, so a future run shows this
+# as a number instead of only being noticed anecdotally (as this stage
+# itself was, spot-checking uprn_all_addresses on a map).
+audit_fuzzy_matches <- function(free_match_unmatched, fuzzy_match) {
+  n_in <- nrow(free_match_unmatched)
+  n_matched <- nrow(fuzzy_match$matched)
+  n_left <- nrow(fuzzy_match$unmatched)
+
+  scores <- fuzzy_match$matched$fuzzy_score
+  out <- data.frame(
+    n_in = n_in,
+    n_fuzzy_matched = n_matched,
+    pct_fuzzy_matched = round(n_matched / pmax(n_in, 1), 4),
+    n_left_for_queue = n_left,
+    score_min = if (n_matched > 0) min(scores) else NA_real_,
+    score_median = if (n_matched > 0) stats::median(scores) else NA_real_,
+    score_max = if (n_matched > 0) max(scores) else NA_real_,
+    stringsAsFactors = FALSE
+  )
+
+  # Breakdown by which stage recovered the match (see match_fuzzy_sources(),
+  # fuzzy_match.R) - added after the 2026-07 Kirklees audit specifically so a
+  # future regression in any one stage (e.g. the geographic fallback
+  # silently finding nothing because postcode_history_lookup failed to
+  # build) shows up as a number here instead of only being noticed
+  # anecdotally, the same way that audit was.
+  block_msg <- ""
+  if (n_matched > 0 && "fuzzy_block" %in% names(fuzzy_match$matched)) {
+    block_counts <- table(fuzzy_match$matched$fuzzy_block, useNA = "ifany")
+    for (b in names(block_counts)) {
+      out[[paste0("n_block_", b)]] <- as.integer(block_counts[[b]])
+    }
+    block_msg <- paste0(
+      " By block: ", paste(names(block_counts), block_counts, sep = "=", collapse = ", "), "."
+    )
+  }
+
+  message(
+    "FUZZY MATCH: ", n_matched, " of ", n_in, " addresses fuzzy-matched (",
+    sprintf("%.2f%%", 100 * out$pct_fuzzy_matched), "), ", n_left,
+    " left for the paid queue.",
+    if (n_matched > 0) {
+      paste0(
+        " Similarity score min=", round(out$score_min, 3),
+        ", median=", round(out$score_median, 3), ", max=", round(out$score_max, 3), "."
+      )
+    } else {
+      ""
+    },
+    block_msg
   )
   out
 }

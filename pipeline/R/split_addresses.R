@@ -54,6 +54,7 @@ clean_boilerplate_address <- function(x, text_rem, long_text_rem = NULL) {
   x <- clean_compass(x)
   x <- clean_land(x)
   x <- clean_flats(x)
+  x <- clean_roof_basement(x)
   x <- clean_airspace(x)
   x <- clean_phrases(x, text_rem)
   x

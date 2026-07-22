@@ -97,6 +97,43 @@ f1 <- clean_flats("the eighth floor being 55 Broadway, London")
 check("clean_flats matches 'eighth'", grepl("@FTS", f1))
 cat("clean_flats: OK\n")
 
+# --- clean_roof_basement -----------------------------------------------------
+suppressMessages({
+  check(
+    "roof: 'the roof of' tagged and address survives",
+    grepl("@ASP", clean_roof_basement("the roof of 55 Prospect Terrace")) &&
+      grepl("55 Prospect Terrace", clean_roof_basement("the roof of 55 Prospect Terrace"))
+  )
+  check(
+    "roof: compass-facing roof tagged (comma end, no 'of')",
+    grepl("@ASP", clean_roof_basement("the south-facing roof, 55 Prospect Terrace")) &&
+      grepl("55 Prospect Terrace", clean_roof_basement("the south-facing roof, 55 Prospect Terrace"))
+  )
+  check(
+    "roof: spaced compass variant ('south east facing roof') tagged",
+    grepl("@ASP", clean_roof_basement("the south east facing roof of 12 Kirkgate"))
+  )
+  check(
+    "basement: 'the basement,' tagged and address survives",
+    grepl("@ASP", clean_roof_basement("the basement, 23 Call Lane")) &&
+      grepl("23 Call Lane", clean_roof_basement("the basement, 23 Call Lane"))
+  )
+  check(
+    "basement: 'the basement of' tagged",
+    grepl("@ASP", clean_roof_basement("the basement of 23 Call Lane"))
+  )
+  check(
+    "roof/basement: bare word without leading 'the' left untouched",
+    !grepl("@ASP", clean_roof_basement("Roof Gardens, 4 High Street"))
+  )
+  check(
+    "roof/basement: normal address unaffected",
+    clean_roof_basement("Oaktree House, 408 Oakwood Lane, Leeds") ==
+      "Oaktree House, 408 Oakwood Lane, Leeds"
+  )
+})
+cat("clean_roof_basement: OK\n")
+
 # --- split_numbers -----------------------------------------------------------
 # (split output keeps incidental double spaces - final_address_tidy squishes
 # them later - so compare squished)
@@ -118,6 +155,19 @@ s4 <- suppressWarnings(parse_number_table(data.frame(
   mod = c(FALSE, TRUE), modval = c("", "(EVN)")
 )))
 check("parse_number_table numeric order", identical(s4, c("8", "10", "12")))
+
+# Unit/room codes shaped like "L3-03629" (a level/block letter fused to
+# digits, hyphen, more digits) must not be read as a house-number range -
+# "L3-03629" was previously expanded into 3,627 fabricated rows for a single
+# student-hall title (Level 3, Room 03629, not numbers 3 to 3629).
+s5 <- split_numbers("L3-03629, Trinity A Halls Of Residence, Laisteridge Lane, Bradford")
+check("unit code not treated as a range", identical(s5, "L3-03629, Trinity A Halls Of Residence, Laisteridge Lane, Bradford"))
+
+# Even without the letter-prefix shape, any range this implausibly large
+# (parse_number_table()'s max_range guard) must fall back to the address
+# unchanged rather than fabricating thousands of rows.
+s6 <- suppressMessages(split_numbers("1-5000 Example Street"))
+check("implausible range falls back unchanged", identical(s6, "1-5000 Example Street"))
 cat("split_numbers: OK\n")
 
 # --- matching keys -----------------------------------------------------------
@@ -157,6 +207,14 @@ check(
   "street name NA for named building",
   is.na(extract_street_name("Ivy Cottage, Ackton Lane"))
 )
+check(
+  "street name collapses a repeated street mention (land/substation boilerplate)",
+  extract_street_name("348 Lowedges Road Lowedges Road and substation Lowedges Road") == "Lowedges Road"
+)
+check(
+  "street name unaffected when there is no repeat",
+  extract_street_name("22 Acacia Avenue") == "Acacia Avenue"
+)
 cat("matching keys: OK\n")
 
 # --- classify_geocodability (audit F2) ---------------------------------------
@@ -181,6 +239,91 @@ check("gate: normal address ok", g[5] == "ok")
 check("gate: legalese", g[6] == "legalese")
 check("gate: empty", g[7] == "empty")
 cat("classify_geocodability: OK\n")
+
+# --- extract_buried_street ----------------------------------------------------
+check(
+  "buried street: found after leading non-street text",
+  extract_buried_street("the paddock north of Foo Street") == "Foo Street"
+)
+check(
+  "buried street: picks the LAST match, not the first",
+  extract_buried_street("Land adjoining Old Mill Lane, rear of Foo Street") == "Foo Street"
+)
+check(
+  "buried street: NA when nothing matches",
+  is.na(extract_buried_street("just some random text"))
+)
+cat("extract_buried_street: OK\n")
+
+# --- match_free_sources(): buried-street last-resort stage --------------------
+street_centroid_lookup_syn <- data.frame(
+  key = "LEEDS|FOO STREET", LATITUDE = 53.8, LONGITUDE = -1.5, n_usrn = 1,
+  stringsAsFactors = FALSE
+)
+buried_rows <- data.frame(
+  `Title Number` = "T1", AddressLine = "the paddock north of Foo Street",
+  PostalCode = NA_character_, District = "Leeds",
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+res_buried <- suppressMessages(match_free_sources(
+  buried_rows,
+  epc_lookup = data.frame(key = character(0), UPRN = numeric(0), LATITUDE = numeric(0), LONGITUDE = numeric(0), match_source = character(0)),
+  price_paid_lookup = data.frame(key = character(0), UPRN = numeric(0), LATITUDE = numeric(0), LONGITUDE = numeric(0), match_source = character(0)),
+  street_centroid_lookup = street_centroid_lookup_syn
+))
+check(
+  "buried street stage resolves a row the leading-segment stage would miss",
+  nrow(res_buried$matched) == 1 && res_buried$matched$match_quality == "street" &&
+    grepl("buried", res_buried$matched$source)
+)
+cat("match_free_sources buried-street stage: OK\n")
+
+# --- street ambiguity (geocode_queue.R) ---------------------------------------
+usrn_street_names_amb <- data.frame(
+  USRN = 1:5,
+  street = c("Prospect Terrace", "Prospect Terrace", "Prospect Terrace", "Prospect Terrace", "Unique Close"),
+  district = c("LEEDS", "WAKEFIELD", "BRADFORD", NA, "LEEDS"),
+  stringsAsFactors = FALSE
+)
+amb_lookup <- build_street_ambiguity_lookup(usrn_street_names_amb)
+check(
+  "ambiguity lookup counts distinct districts, ignoring NA",
+  amb_lookup$n_district[amb_lookup$street_norm == "PROSPECT TERRACE"] == 3
+)
+check(
+  "flag_ambiguous_street: no postcode + common name -> ambiguous",
+  flag_ambiguous_street("55 Prospect Terrace", NA_character_, amb_lookup, min_district = 3)
+)
+check(
+  "flag_ambiguous_street: WITH a postcode -> not flagged",
+  !flag_ambiguous_street("55 Prospect Terrace", "LS6 1RN", amb_lookup, min_district = 3)
+)
+check(
+  "flag_ambiguous_street: unique street name -> not flagged",
+  !flag_ambiguous_street("2 Unique Close", NA_character_, amb_lookup, min_district = 3)
+)
+cat("street ambiguity flagging: OK\n")
+
+# --- build_geocode_queue(): queue_priority wiring ------------------------------
+queue_input <- data.frame(
+  `Title Number` = c("T1", "T2"),
+  AddressLine = c("55 Prospect Terrace", "12 Unique Close, Leeds"),
+  PostalCode = NA_character_, District = c(NA_character_, "LEEDS"),
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+qtmp <- tempfile(fileext = ".rds")
+q_out <- suppressMessages(build_geocode_queue(queue_input, queue_path = qtmp, street_ambiguity = amb_lookup))
+check(
+  "ambiguous row deprioritised but still pending",
+  q_out$queue_priority[q_out$AddressLine == "55 Prospect Terrace"] == 1L &&
+    q_out$status[q_out$AddressLine == "55 Prospect Terrace"] == "pending"
+)
+check(
+  "unambiguous row keeps default priority",
+  q_out$queue_priority[q_out$AddressLine == "12 Unique Close, Leeds"] == 0L
+)
+unlink(qtmp)
+cat("build_geocode_queue queue_priority: OK\n")
 
 # --- gap guessing (synthetic street) -----------------------------------------
 known <- data.frame(

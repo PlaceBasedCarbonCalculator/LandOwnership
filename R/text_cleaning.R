@@ -263,6 +263,53 @@ clean_land <- function(x){
   return(x)
 }
 
+# Replace "the roof of ...", "the [compass]-facing roof ..." and "the
+# basement ..." descriptions with @ASP - these describe a sub-part of a
+# building's structure, the same conceptual boilerplate clean_airspace()
+# strips, but they turn up in real Land Registry text WITHOUT the word
+# "airspace"/"air space" ever appearing (audit finds: "the roof of 55
+# Prospect Terrace", "the south-facing roof, ...", "the basement, ...") so
+# clean_airspace()'s start-word list never fires on them. Compass prefixes
+# ("north/south/east/west-facing") also slip past clean_compass(), which
+# only recognises a fixed set of end words ("of"/"side of"/...) and doesn't
+# know "facing".
+#
+# Deliberately anchored on a leading "the" (never a bare "roof"/"basement"
+# with no article) to avoid ever eating a genuine street/building name that
+# happens to contain either word - conservative by design, same trade-off
+# clean_land() makes by anchoring most of its phrases on "the"/"a".
+clean_roof_basement <- function(x) {
+  compass <- c(
+    "north", "south", "east", "west",
+    "north-east", "south-east", "north-west", "south-west",
+    "north east", "south east", "north west", "south west",
+    "northeast", "southeast", "northwest", "southwest"
+  )
+  compass_rx <- paste0("(", paste(compass, collapse = ")|("), ")")
+  facing_rx <- paste0("(", compass_rx, ")[- ]facing\\s+")
+  end_rx <- "(\\s*,)?(\\s+\\b(of|being)\\b)?"
+
+  roof_rx <- paste0(
+    "\\bthe\\s+(", facing_rx, ")?roof\\b(\\s+(space|void|area|level|terrace))?", end_rx
+  )
+  x <- stringi::stri_replace_all_regex(
+    str = x, pattern = roof_rx, replacement = "@ASP",
+    opts_regex = stringi::stri_opts_regex(case_insensitive = TRUE)
+  )
+
+  basement_rx <- paste0("\\bthe\\s+basement\\b(\\s+(area|level|flat|floor))?", end_rx)
+  x <- stringi::stri_replace_all_regex(
+    str = x, pattern = basement_rx, replacement = "@ASP",
+    opts_regex = stringi::stri_opts_regex(case_insensitive = TRUE)
+  )
+
+  message(
+    sum(grepl("\\bthe (roof|basement)\\b", x, ignore.case = TRUE)),
+    " occurances of 'the roof'/'the basement' remain"
+  )
+  return(x)
+}
+
 # Remove known boilerplate phrases from x in parallel. `text_rem` is a
 # two-column data frame (term, flag), e.g. read from data/clean_strings.xlsx;
 # longer terms are removed first. Also strips filed-plan references, mangled

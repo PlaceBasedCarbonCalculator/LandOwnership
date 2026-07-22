@@ -265,15 +265,26 @@ build_uprn_places <- function(nsul, lad_district) {
 # ---------------------------------------------------------------------------
 
 # One row per UPRN that already has a usable address (EPC domestic /
-# non-domestic / Price Paid / DEC), with the house number and street name
-# parsed out of the first address line. This is both a matching resource in
-# its own right and the "training data" for the USRN street-name inference.
-# dec_addresses (optional) is the Display Energy Certificate address table
-# with NSUL postcodes attached (see epc_addresses.R); it ranks last in the
-# per-UPRN priority order because DECs only cover public/commercial
-# buildings and carry a single unstructured address line.
+# non-domestic / Price Paid / OSM ref:gb:uprn tag / DEC), with the house
+# number and street name parsed out of the first address line. This is both
+# a matching resource in its own right and the "training data" for the USRN
+# street-name inference. osm_uprn_addresses (optional) is the DIRECT
+# UPRN->address crosswalk from OSM's own ref:gb:uprn tagging
+# (build_osm_uprn_addresses(), osm_uprn.R) - unlike the proximity-based OSM
+# building match in uprn_infill's infill stage, this is an exact tag match,
+# so it ranks ahead of DEC (single unstructured line, public/commercial
+# buildings only) but behind the three structured Land Registry/EPC sources.
+# education_addresses / cultural_venue_addresses (both optional) are two
+# further official, UPRN-keyed sources (other_uprn_sources.R: DfE's GIAS
+# schools extract and the GLA's Cultural Infrastructure Map) - structured
+# single-line addresses like osm_uprn_tag, but from smaller/more specialised
+# registers, so they rank just below it. dec_addresses (optional) ranks last
+# for the reason above.
 build_known_uprn_addresses <- function(uprn_epc_lr, house_price_lr_uprn,
-                                       dec_addresses = NULL) {
+                                       dec_addresses = NULL,
+                                       osm_uprn_addresses = NULL,
+                                       education_addresses = NULL,
+                                       cultural_venue_addresses = NULL) {
   dom <- uprn_epc_lr$domestic
   nondom <- uprn_epc_lr$nondomestic
   hp <- house_price_lr_uprn[!is.na(house_price_lr_uprn$uprn), ]
@@ -319,6 +330,24 @@ build_known_uprn_addresses <- function(uprn_epc_lr, house_price_lr_uprn,
     grab(nondom, "UPRN", "adr1", "postcode", "epc_nondomestic"),
     grab(hp, "uprn", "address_combined", "postcode", "price_paid")
   )
+  if (!is.null(osm_uprn_addresses) && nrow(osm_uprn_addresses) > 0) {
+    known <- dplyr::bind_rows(
+      known,
+      grab(osm_uprn_addresses, "UPRN", "addr", "postcode", "osm_uprn_tag")
+    )
+  }
+  if (!is.null(education_addresses) && nrow(education_addresses) > 0) {
+    known <- dplyr::bind_rows(
+      known,
+      grab(education_addresses, "UPRN", "addr", "postcode", "education")
+    )
+  }
+  if (!is.null(cultural_venue_addresses) && nrow(cultural_venue_addresses) > 0) {
+    known <- dplyr::bind_rows(
+      known,
+      grab(cultural_venue_addresses, "UPRN", "addr", "postcode", "cultural_venue")
+    )
+  }
   if (!is.null(dec_addresses) && nrow(dec_addresses) > 0) {
     known <- dplyr::bind_rows(
       known,
@@ -458,23 +487,36 @@ build_postcode_district_lookup <- function(...) {
   counts[!duplicated(counts$postcode), c("postcode", "district")]
 }
 
-# Give each USRN a street name (and district). Two sources, EPC/PP first:
+# Give each USRN a street name (and district). Three sources, in order:
 #   1. Majority vote of the parsed street names of the USRN's known UPRNs
 #      (`street_agreement` = share agreeing with the winner; low agreement
 #      means messy LIDS links or address parses, so the name isn't trusted).
 #      These names follow Land Registry address conventions, so they win.
-#   2. For USRNs with no EPC/PP presence at all: the nearest named OSM road
-#      (street_confidence "osm_road") - pass usrn_geom + osm_roads.
+#   2. For USRNs still unnamed: OS Open Map Local's `distinctive_name`
+#      (street_confidence "oml_road") - see pipeline/R/open_map_local.R's
+#      link_usrn_oml(); authoritative OS data with near-complete coverage,
+#      so it's tried before the OSM fallback below (pass `oml_link`).
+#   3. For USRNs still unnamed after both: the nearest named OSM road
+#      (street_confidence "osm_road") - pass usrn_geom + osm_roads. OSM's
+#      main remaining value-add here is the back alleys/private ways OML
+#      doesn't map at all.
 # Districts come from the majority postcode via the LR-derived lookup where
 # possible, else point-in-polygon against data/la_bounds.geojson. The
 # majority EPC/PP postcode itself is also kept (as `postcode`, NA for
-# OSM/geometry-named streets) - a long road can run through several
+# OML/OSM/geometry-named streets) - a long road can run through several
 # postcodes with a single LR `district`, so build_street_centroid_lookup()
 # uses this to offer a postcode-scoped centroid alongside the district-wide
 # one, precise enough for a numberless "land on X Road (postcode)" title.
+#
+# `oml_classification`/`oml_road_number`/`oml_class_agreement` are attached
+# to EVERY USRN link_usrn_oml() could classify, regardless of which of the
+# three sources above actually won the name - a USRN named from real EPC/PP
+# addresses still benefits from knowing whether OML calls it a Motorway for
+# geocode_queue.R's road-type routing.
 build_usrn_street_names <- function(uprn_usrn, known_uprn_addresses, postcode_district,
                                     usrn_geom = NULL, osm_roads = NULL,
-                                    la_bounds_path = NULL, uprn_places = NULL) {
+                                    la_bounds_path = NULL, uprn_places = NULL,
+                                    oml_link = NULL) {
   empty <- data.frame(
     USRN = numeric(0), street = character(0), district = character(0),
     postcode = character(0), street_n = integer(0), street_agreement = numeric(0),
@@ -512,7 +554,26 @@ build_usrn_street_names <- function(uprn_usrn, known_uprn_addresses, postcode_di
   }
   message(nrow(per_usrn), " USRNs named from EPC/Price-Paid addresses.")
 
-  # OSM road names for streets with no EPC/PP presence at all
+  # Open Map Local distinctive_name for streets with no EPC/PP presence -
+  # tried before OSM (see the function header). oml_link is link_usrn_oml()'s
+  # per-USRN output; only its `street` columns are used here, the
+  # classification columns are joined onto the finished table further down.
+  if (!is.null(oml_link) && nrow(oml_link) > 0) {
+    oml_todo <- oml_link[!oml_link$USRN %in% per_usrn$USRN & !is.na(oml_link$street), ]
+    oml_todo <- oml_todo[oml_todo$street_agreement >= 0.6, ]
+    if (nrow(oml_todo) > 0) {
+      oml_named <- data.frame(
+        USRN = oml_todo$USRN, street = oml_todo$street,
+        street_n = oml_todo$street_n, street_agreement = oml_todo$street_agreement,
+        district = NA_character_, postcode = NA_character_,
+        street_confidence = "oml_road", stringsAsFactors = FALSE
+      )
+      per_usrn <- dplyr::bind_rows(per_usrn, oml_named)
+    }
+    message(nrow(oml_todo), " further USRNs named from Open Map Local distinctive_name.")
+  }
+
+  # OSM road names for streets with no EPC/PP or OML presence at all
   if (!is.null(usrn_geom) && !is.null(osm_roads)) {
     osm_named <- name_usrns_from_osm(usrn_geom, osm_roads,
       exclude_usrns = per_usrn$USRN
@@ -554,6 +615,20 @@ build_usrn_street_names <- function(uprn_usrn, known_uprn_addresses, postcode_di
     di <- match(per_usrn$USRN, la_d$USRN)
     per_usrn$district <- ifelse(is.na(per_usrn$district), la_d$district[di], per_usrn$district)
   }
+
+  # OML road classification, joined onto every USRN it covers regardless of
+  # which source above actually named the street (see the function header).
+  if (!is.null(oml_link) && nrow(oml_link) > 0) {
+    ci <- match(per_usrn$USRN, oml_link$USRN)
+    per_usrn$oml_classification <- oml_link$oml_classification[ci]
+    per_usrn$oml_class_agreement <- oml_link$oml_class_agreement[ci]
+    per_usrn$oml_road_number <- oml_link$oml_road_number[ci]
+  } else {
+    per_usrn$oml_classification <- NA_character_
+    per_usrn$oml_class_agreement <- NA_real_
+    per_usrn$oml_road_number <- NA_character_
+  }
+
   per_usrn
 }
 

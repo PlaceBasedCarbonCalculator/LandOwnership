@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>UPRN viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Simple click-to-inspect viewer for output/uprn_pmtiles/uprn_points.pmtiles
+  (see pipeline/R/pmtiles.R::build_uprn_pmtiles()). Self-contained HTML - only
+  external dependencies are the MapLibre GL JS + pmtiles.js libraries (CDN)
+  and, optionally, the OpenFreeMap "liberty" basemap style (free, no API key,
+  CORS-enabled) for geographic context; the UPRN dots themselves come
+  entirely from the local .pmtiles file.
+
+  MUST be served over http(s), not opened as a file:// URL - the pmtiles
+  format is read via HTTP range requests, which the file:// scheme doesn't
+  support in most browsers. From the repo root:
+
+    npx --yes serve -l 8080 .
+    (or: python -m http.server 8080)
+
+  then open http://localhost:8080/docs/uprn_pmtiles.html - it looks for the
+  tileset at ../output/uprn_pmtiles/uprn_points.pmtiles by default (see
+  PMTILES_URL below; edit if you built it somewhere else).
+-->
+<script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+<link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/pmtiles@3/dist/pmtiles.js"></script>
+<style>
+  html, body, #map { height: 100%; margin: 0; padding: 0; font-family: system-ui, sans-serif; }
+  #panel {
+    position: absolute; top: 10px; left: 10px; z-index: 1;
+    background: rgba(255,255,255,0.95); border-radius: 8px; padding: 10px 14px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3); font-size: 13px; max-width: 260px;
+  }
+  #panel h1 { font-size: 14px; margin: 0 0 8px; }
+  #panel label { display: block; margin-top: 8px; font-weight: 600; }
+  #panel select { width: 100%; margin-top: 2px; }
+  #status { margin-top: 8px; color: #555; font-size: 12px; }
+  #legend { margin-top: 10px; }
+  .legend-row { display: flex; align-items: center; margin-top: 3px; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 50%; margin-right: 6px; border: 1px solid #0003; flex: none; }
+  .maplibregl-popup-content { font-size: 12px; max-width: 260px; }
+  .maplibregl-popup-content table { border-collapse: collapse; width: 100%; }
+  .maplibregl-popup-content td { padding: 1px 4px; vertical-align: top; }
+  .maplibregl-popup-content td:first-child { font-weight: 600; white-space: nowrap; color: #333; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h1>UPRN viewer</h1>
+  <label for="colourBy">Colour dots by</label>
+  <select id="colourBy">
+    <option value="epc_rating">EPC band (domestic, A-G)</option>
+    <option value="epc_asset_rating">EPC asset rating (non-domestic)</option>
+    <option value="class">Domestic / non-domestic</option>
+    <option value="address_source">Address source</option>
+    <option value="has_address">Has an address at all</option>
+    <option value="current_value">Current value (2025 est.)</option>
+  </select>
+  <div id="legend"></div>
+  <div id="status">Loading tileset...</div>
+</div>
+<script>
+// Edit this if the tileset was built somewhere other than the default
+// output_path in build_uprn_pmtiles() (pipeline/R/pmtiles.R).
+const PMTILES_URL = "../output/uprn_pmtiles/uprn_points.pmtiles";
+const SOURCE_LAYER = "uprn"; // matches make_pmtiles(..., layer = "uprn") in pipeline/R/pmtiles.R
+
+const protocol = new pmtiles.Protocol();
+maplibregl.addProtocol("pmtiles", protocol.tile);
+
+// OpenFreeMap's "liberty" style: free, keyless, CORS-enabled, used only for
+// geographic context (roads/place names) behind the UPRN dots. If it can't
+// be reached (offline use), the map falls back to a plain background so the
+// UPRN layer still works standalone.
+const BASEMAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
+const BLANK_STYLE = { version: 8, sources: {}, layers: [
+  { id: "bg", type: "background", paint: { "background-color": "#eef1f4" } }
+]};
+
+// The two EPC ratings are deliberately separate modes, not one combined
+// "EPC" mode: `epc_rating` is the DOMESTIC A-G efficiency band, while
+// `epc_asset_rating` is the NON-DOMESTIC numeric asset rating (a CO2 index
+// on a different scale). Colouring both with one ramp would either compare
+// incomparable numbers or require asserting band thresholds the pipeline
+// has no authority to set - see build_uprn_pmtiles_data() in
+// pipeline/R/pmtiles.R. A UPRN only ever has one or the other, so each mode
+// greys out the register it doesn't cover.
+const colourExpressions = {
+  epc_rating: [
+    "match", ["coalesce", ["get", "epc_rating"], "none"],
+    "A", "#1a9850", "B", "#66bd63", "C", "#a6d96a", "D", "#fee08b",
+    "E", "#fdae61", "F", "#f46d43", "G", "#d73027",
+    /* other/unknown */ "#9e9e9e"
+  ],
+  // Non-domestic asset rating: LOWER is better (it's a CO2 index, not an
+  // efficiency score), so the ramp runs green->red with increasing value.
+  // Cut points are the published non-domestic band boundaries (A 0-25,
+  // B 26-50, C 51-75, D 76-100, E 101-125, F 126-150, G 151+) so the
+  // colours line up with the bands a certificate would actually show.
+  epc_asset_rating: [
+    "case", ["==", ["coalesce", ["get", "epc_asset_rating"], -1], -1], "#9e9e9e",
+    ["step", ["get", "epc_asset_rating"],
+      "#1a9850", 26, "#66bd63", 51, "#a6d96a", 76, "#fee08b",
+      101, "#fdae61", 126, "#f46d43", 151, "#d73027"
+    ]
+  ],
+  class: [
+    "match", ["coalesce", ["get", "class"], "unknown"],
+    "domestic", "#4575b4", "non-domestic", "#d73027", "unknown", "#9e9e9e",
+    "#9e9e9e"
+  ],
+  address_source: [
+    "match", ["coalesce", ["get", "address_source"], "none"],
+    "epc_domestic", "#1a9850", "epc_nondomestic", "#1a9850",
+    "price_paid", "#4575b4", "dec", "#4575b4",
+    "osm_uprn_tag", "#66bd63", "education", "#66bd63", "cultural_venue", "#66bd63",
+    "geocode_2022", "#91bfdb",
+    "none", "#d73027",
+    /* any infill_*/ "#fdae61"
+  ],
+  has_address: [
+    "case", ["!=", ["coalesce", ["get", "address"], ""], ""], "#1a9850", "#d73027"
+  ],
+  current_value: [
+    "case", ["==", ["coalesce", ["get", "current_value"], 0], 0], "#9e9e9e",
+    ["interpolate", ["linear"], ["get", "current_value"],
+      0, "#fee08b", 150000, "#fdae61", 300000, "#f46d43", 600000, "#d73027", 1200000, "#7f0000"
+    ]
+  ]
+};
+
+const legends = {
+  epc_rating: [["A","#1a9850"],["B","#66bd63"],["C","#a6d96a"],["D","#fee08b"],["E","#fdae61"],["F","#f46d43"],["G","#d73027"],["No domestic band","#9e9e9e"]],
+  epc_asset_rating: [["A (0-25)","#1a9850"],["B (26-50)","#66bd63"],["C (51-75)","#a6d96a"],["D (76-100)","#fee08b"],["E (101-125)","#fdae61"],["F (126-150)","#f46d43"],["G (151+)","#d73027"],["No asset rating","#9e9e9e"]],
+  class: [["Domestic","#4575b4"],["Non-domestic","#d73027"],["Unknown","#9e9e9e"]],
+  address_source: [["Real address (EPC/PP/DEC/OSM)","#1a9850"],["Real address (other)","#4575b4"],["Inferred (infill)","#fdae61"],["No address","#d73027"]],
+  has_address: [["Has an address","#1a9850"],["No address text","#d73027"]],
+  current_value: [["< £150k","#fee08b"],["£150k-£300k","#fdae61"],["£300k-£600k","#f46d43"],["£600k-£1.2m","#d73027"],["> £1.2m","#7f0000"],["No estimate","#9e9e9e"]]
+};
+
+function drawLegend(key) {
+  const el = document.getElementById("legend");
+  el.innerHTML = legends[key].map(([label, colour]) =>
+    `<div class="legend-row"><span class="legend-swatch" style="background:${colour}"></span>${label}</div>`
+  ).join("");
+}
+
+function fieldRow(label, value) {
+  if (value === undefined || value === null || value === "") return "";
+  return `<tr><td>${label}</td><td>${value}</td></tr>`;
+}
+
+function popupHtml(p) {
+  const value = p.current_value ? "£" + Number(p.current_value).toLocaleString() : "";
+  const lastSale = p.last_sale_price
+    ? "£" + Number(p.last_sale_price).toLocaleString() + (p.last_sale_date ? " (" + p.last_sale_date + ")" : "")
+    : "";
+  return "<table>" +
+    fieldRow("UPRN", p.UPRN) +
+    fieldRow("Address", p.address || "<em>none known</em>") +
+    fieldRow("Source", p.address_source) +
+    fieldRow("District", p.district) +
+    fieldRow("Postcode", p.postcode) +
+    fieldRow("Class", p.class) +
+    fieldRow("EPC band (domestic)", p.epc_rating) +
+    fieldRow("EPC asset rating (non-domestic)", p.epc_asset_rating) +
+    fieldRow("Current value (2025 est.)", value) +
+    fieldRow("Last sale", lastSale) +
+    "</table>";
+}
+
+async function init() {
+  let styleSpec = BLANK_STYLE;
+  try {
+    const r = await fetch(BASEMAP_STYLE, { method: "HEAD" });
+    if (r.ok) styleSpec = BASEMAP_STYLE;
+  } catch (e) { /* offline / blocked - fall back to the blank background */ }
+
+  const map = new maplibregl.Map({
+    container: "map",
+    style: styleSpec,
+    center: [-1.5, 53.0], // roughly the centre of England - adjust to taste
+    zoom: 6
+  });
+  map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+  map.on("load", () => {
+    map.addSource("uprn", {
+      type: "vector",
+      url: "pmtiles://" + PMTILES_URL
+    });
+    map.addLayer({
+      id: "uprn-points",
+      type: "circle",
+      source: "uprn",
+      "source-layer": SOURCE_LAYER,
+      paint: {
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 6, 1.5, 12, 3, 16, 6],
+        "circle-color": colourExpressions.epc_rating,
+        "circle-stroke-width": 0.5,
+        "circle-stroke-color": "#ffffff",
+        "circle-opacity": 0.85
+      }
+    });
+    document.getElementById("status").textContent = "Tileset loaded. Click a dot for details.";
+    drawLegend("epc_rating");
+
+    map.on("click", "uprn-points", (e) => {
+      const p = e.features[0].properties;
+      new maplibregl.Popup({ maxWidth: "280px" })
+        .setLngLat(e.lngLat)
+        .setHTML(popupHtml(p))
+        .addTo(map);
+    });
+    map.on("mouseenter", "uprn-points", () => { map.getCanvas().style.cursor = "pointer"; });
+    map.on("mouseleave", "uprn-points", () => { map.getCanvas().style.cursor = ""; });
+  });
+
+  map.on("error", (e) => {
+    const msg = (e && e.error && e.error.message) || "unknown error";
+    document.getElementById("status").textContent =
+      "Error loading the tileset (" + msg + "). Check PMTILES_URL in this file and " +
+      "that you're serving it over http(s), not opening it as a file:// URL.";
+  });
+
+  document.getElementById("colourBy").addEventListener("change", (e) => {
+    const key = e.target.value;
+    if (map.getLayer("uprn-points")) {
+      map.setPaintProperty("uprn-points", "circle-color", colourExpressions[key]);
+    }
+    drawLegend(key);
+  });
+}
+
+init();
+</script>
+</body>
+</html>

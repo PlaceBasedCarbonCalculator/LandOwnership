@@ -118,7 +118,23 @@ class_string <- function(str){
 # Expand a table of house numbers (built by split_numbers) into the full
 # vector of individual numbers. Rows flagged as `link` are ranges and are
 # expanded, stepping by 1 ("(INC)") or 2 ("(ODD)"/"(EVN)").
-parse_number_table <- function(spt_tab){
+# `max_range` is a sanity cap on how many numbers a single range can expand
+# to - checked on the EXPANDED COUNT (accounting for the odd/even step),
+# not the raw gap between the two numbers: a diff of 208 is only 105 real
+# addresses for an "(EVN)" range, but would be 209 for "(INC)". Real UK
+# streets and even large council blocks/tower estates run up into the low
+# hundreds (e.g. genuine, confirmed examples: "Sulivan Court" flats 1-484,
+# "Stonemill Terrace" 1-324, "Victoria Square" 1-277), so the cap is set
+# well above that - a bigger gap almost always means the two "numbers"
+# either side of a hyphen weren't a house-number range at all - typically a
+# unit/room/plot code (e.g. "L3-03629", a hall-of-residence level+room code,
+# was previously misread as "number 3 to number 3629" and expanded into
+# 3,627 fabricated addresses for one title) or unrelated numbers from
+# different clauses of the same title getting linked together. Returns
+# NULL - instead of a best-effort guess - so the caller can fall back to
+# leaving the address unsplit; guessing which few hundred of an implausible
+# few-thousand-long range are "real" isn't safely possible.
+parse_number_table <- function(spt_tab, max_range = 600){
   if(nrow(spt_tab) == 0){
     return(character(0))
   }
@@ -135,11 +151,18 @@ parse_number_table <- function(spt_tab){
       } else{
         mvn = -2
       }
-      
+
       # Make sequences
       nn <- as.numeric(gsub('[a-zA-Z]',"",n))
       nnm1 <- as.numeric(gsub('[a-zA-Z]',"",spt_tab$number[i - 1]))
-      
+
+      if(!is.na(nn) && !is.na(nnm1)){
+        n_expected <- floor(abs(nn - nnm1) / abs(mvn)) + 1
+        if(n_expected > max_range){
+          return(NULL)
+        }
+      }
+
       n2 <- try(seq(nn, nnm1, by = mvn), silent = TRUE)
       if("try-error" %in% class(n2)){
         n2 <- seq(nn, nnm1, by = -mvn)
@@ -190,7 +213,17 @@ split_numbers <- function(x){
   if(numb_count == 2 & grepl("Unit",x, ignore.case = FALSE)){
     return(x)
   }
-  
+
+  # A bare letter fused directly to digits, then a hyphen, then more digits
+  # ("L3-03629", "P11-188", "G096-1") is a unit/room/plot code - a level or
+  # block letter plus a number - never a genuine house-number range, no
+  # matter how the digits compare. Caught here explicitly (not just by the
+  # max_range guard in parse_number_table()) so this specific, common shape
+  # comes back as one clean unsplit row rather than a merely-suppressed one.
+  if(grepl("\\b[A-Za-z]\\d+-\\d+\\b", x)){
+    return(x)
+  }
+
   #Spelling errors
   x <- gsub("numberes","numbers",x, ignore.case = TRUE)
   x <- gsub("nombers","numbers",x, ignore.case = TRUE)
@@ -418,6 +451,10 @@ split_numbers <- function(x){
     spt_tab$modval <- ifelse(spt_tab$mod,spt_sub[spt_tab$position + 1],"")
     
     numb_vec = parse_number_table(spt_tab)
+    if(is.null(numb_vec)){
+      message("\n Implausible house-number range in: ", x)
+      return(x)
+    }
     if(no_road_flag){
       res_sub = as.character(numb_vec)
     } else {

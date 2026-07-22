@@ -14,22 +14,32 @@ snap_geocoded_to_uprn <- function(azure_results, uprn_historical, tolerance_m = 
     return(azure_results)
   }
 
-  pts <- sf::st_as_sf(azure_results, coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
-  pts <- sf::st_transform(pts, 27700)
-
-  uprn_pts <- sf::st_as_sf(
-    uprn_historical[, c("UPRN", "X_COORDINATE", "Y_COORDINATE")],
-    coords = c("X_COORDINATE", "Y_COORDINATE"), crs = 27700
+  # Nearest-UPRN search via RANN's kd-tree on plain coordinate matrices, NOT
+  # sf::st_nearest_feature() on `sf` geometry objects built from the full
+  # national uprn_historical table (~36-41M rows). This function used to
+  # build exactly that - the same construction cost that made
+  # fuzzy_match_geographic() hang for a full day before being rewritten this
+  # way (see the 2026-07-21 fuzzy_match runtime incident); st_nearest_feature()
+  # itself is a safer single-nearest lookup than the pairwise
+  # st_is_within_distance() that actually broke, but constructing the `sf`
+  # object over every UPRN in England & Wales first was still the same
+  # dormant risk, flagged for fixing once real Azure batches start coming
+  # back. sf::sf_project() transforms the WGS84 Azure results to British
+  # National Grid (matching uprn_historical's already-BNG X/Y) as a plain
+  # matrix, never creating `sf` geometries.
+  azure_xy <- sf::sf_project(
+    from = "EPSG:4326", to = "EPSG:27700",
+    pts = as.matrix(azure_results[, c("longitude", "latitude")])
   )
+  uprn_xy <- as.matrix(uprn_historical[, c("X_COORDINATE", "Y_COORDINATE")])
 
-  nearest_idx <- sf::st_nearest_feature(pts, uprn_pts)
-  dist <- sf::st_distance(pts, uprn_pts[nearest_idx, ], by_element = TRUE)
+  nn <- RANN::nn2(data = uprn_xy, query = azure_xy, k = 1)
 
-  pts$UPRN <- uprn_pts$UPRN[nearest_idx]
-  pts$uprn_snap_distance_m <- as.numeric(dist)
-  pts$UPRN[pts$uprn_snap_distance_m > tolerance_m] <- NA
+  out <- azure_results
+  out$UPRN <- uprn_historical$UPRN[nn$nn.idx[, 1]]
+  out$uprn_snap_distance_m <- nn$nn.dists[, 1]
+  out$UPRN[out$uprn_snap_distance_m > tolerance_m] <- NA
 
-  out <- sf::st_drop_geometry(pts)
   out$source <- ifelse(is.na(out$UPRN), "azure_geocoded", "azure_geocoded_uprn_snap")
   # rows whose location was copied from a flat group's representative (see
   # pipeline/R/geocode_flat_infer.R) carry that provenance through - they

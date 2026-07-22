@@ -4,13 +4,21 @@
 # downstream reruns whenever the file's content changes (e.g. after a
 # manual geocode batch updates row statuses).
 #
-# Existing "done"/"failed" status is always preserved across reruns: this
-# function only appends genuinely new queue_keys, it never resets progress
-# that run_geocode_batch() has already made. Rows that are still "pending"
-# (or "not_geocodable") but whose queue_key no longer appears in the
-# current unmatched set - i.e. the cleaning logic changed and produced a
-# different AddressLine - are dropped, so stale keys don't sit in the queue
-# wasting quota (audit F10).
+# Existing "done"/"failed"/"inferred" rows are always preserved as-is across
+# reruns: this function never resets progress that run_geocode_batch() or
+# infer_flat_locations() has already made. Rows that are still "pending",
+# "deferred_flat" or "not_geocodable" get their derived columns (PostalCode,
+# District, category, status, queue_reason, ...) refreshed from the current
+# cleaning output whenever their queue_key survives into the new unmatched
+# set - a surviving key means AddressLine/Title Number didn't change, but
+# other columns can still improve (see the refresh comment in
+# build_geocode_queue() - 403 rows found stuck with a stale PostalCode NA
+# from before a cleaning fix landed). Only real progress/audit state
+# (attempts, last_attempt_date, flat_group/flat_rep_key/flat_check/
+# flat_group_n) survives the refresh untouched. Rows whose queue_key no
+# longer appears in the current unmatched set at all - i.e. the cleaning
+# logic changed and produced a different AddressLine - are dropped, so
+# stale keys don't sit in the queue wasting quota (audit F10).
 
 # Classify whether an address is worth a paid geocode call (audit F2).
 # Returns "ok" or a reason string. Anything not "ok" is stored in the queue
@@ -159,7 +167,50 @@ assign_flat_groups <- function(queue, min_group = 3) {
   queue
 }
 
-build_geocode_queue <- function(unmatched, queue_path = "data/geocoding/queue.rds") {
+# --- Ambiguous-street deprioritisation ---------------------------------------
+#
+# "55 Prospect Terrace" with no postcode isn't safely geocodable by name
+# alone if Britain has several unrelated streets called "Prospect Terrace" -
+# Azure has no more disambiguating context than we do, so a paid call is a
+# coin toss. These rows are still queued (a human/Azure might resolve them
+# with more context than this pipeline has), just sorted BEHIND every
+# ordinary row - see queue_priority below and its use in
+# geocode_batch_runner.R's run_geocode_batch().
+
+# How many distinct districts (nationally, per usrn_street_names -
+# uprn_infill.R) share each normalised street name. A name that only ever
+# occurs in one district is safe to treat as unique even with no postcode;
+# one spread across several is the "common name" shape that's ambiguous
+# without a postcode to pin it down.
+build_street_ambiguity_lookup <- function(usrn_street_names) {
+  x <- usrn_street_names[!is.na(usrn_street_names$street), ]
+  dt <- data.table::data.table(
+    street_norm = normalise_name(x$street), district = x$district
+  )
+  agg <- dt[, .(n_district = data.table::uniqueN(district[!is.na(district)])), by = street_norm]
+  as.data.frame(agg)
+}
+
+# TRUE when a row has NO postcode AND its extracted street name is shared
+# by `min_district` or more districts nationally (default 3 - allows a
+# little incidental name reuse, e.g. every town having *a* "Church Lane",
+# without flagging every street that merely isn't perfectly unique).
+# Rows whose street can't be extracted at all (extract_street_name()
+# requires a leading house number) are never flagged here - they're not
+# "ambiguous", they're just not this kind of row.
+flag_ambiguous_street <- function(address, postcode, street_ambiguity, min_district = 3) {
+  has_pc <- !is.na(postcode) & postcode != ""
+  street_norm <- normalise_name(extract_street_name(address))
+  ni <- match(street_norm, street_ambiguity$street_norm)
+  n_district <- street_ambiguity$n_district[ni]
+  !has_pc & !is.na(street_norm) & !is.na(n_district) & n_district >= min_district
+}
+
+# `street_ambiguity` (optional - build_street_ambiguity_lookup() above) flags
+# rows for queue_priority; omit to leave every row at the default priority
+# (e.g. in tests, or if usrn_street_names isn't available for some reason).
+build_geocode_queue <- function(unmatched, queue_path = "data/geocoding/queue.rds",
+                                street_ambiguity = NULL) {
   new_rows <- unmatched
   new_rows$queue_key <- paste(new_rows$`Title Number`, new_rows$AddressLine, sep = "||")
   new_rows <- new_rows[!duplicated(new_rows$queue_key), ]
@@ -168,10 +219,31 @@ build_geocode_queue <- function(unmatched, queue_path = "data/geocoding/queue.rd
   new_rows$attempts <- 0L
   new_rows$last_attempt_date <- as.Date(NA)
 
+  # queue_priority: 0 = normal, 1 = deprioritised (ambiguous street, no
+  # postcode - see flag_ambiguous_street() above). Never affects status/
+  # queue_reason - these rows are still "ok"/"pending", just sorted last by
+  # run_geocode_batch().
+  new_rows$queue_priority <- 0L
+  if (!is.null(street_ambiguity) && nrow(street_ambiguity) > 0) {
+    ambiguous <- flag_ambiguous_street(new_rows$AddressLine, new_rows$PostalCode, street_ambiguity)
+    new_rows$queue_priority[ambiguous] <- 1L
+    n_amb <- sum(ambiguous & new_rows$status == "pending")
+    if (n_amb > 0) {
+      message(
+        n_amb, " pending addresses deprioritised: no postcode and a street ",
+        "name shared by several districts nationally (ambiguous without ",
+        "more context than this pipeline or Azure has)."
+      )
+    }
+  }
+
   if (file.exists(queue_path)) {
     existing <- readRDS(queue_path)
     if (!"queue_reason" %in% names(existing)) {
       existing$queue_reason <- NA_character_
+    }
+    if (!"queue_priority" %in% names(existing)) {
+      existing$queue_priority <- 0L
     }
     # keep every row that has actually been sent to Azure or already carries
     # an inferred location (its spend/result is real, whatever the current
@@ -180,12 +252,41 @@ build_geocode_queue <- function(unmatched, queue_path = "data/geocoding/queue.rd
     spent <- existing[existing$status %in% c("done", "failed", "inferred"), ]
     unspent <- existing[!existing$status %in% c("done", "failed", "inferred"), ]
     stale <- !unspent$queue_key %in% new_rows$queue_key
-    kept <- unspent[!stale, ]
+    kept_old <- unspent[!stale, ]
+
+    # A surviving queue_key means AddressLine/Title Number are unchanged,
+    # but that's not the same as "nothing about this row changed" - other
+    # derived columns (PostalCode, District, category, ...) come from the
+    # SAME cleaning code and can still improve between runs (e.g. the audit
+    # F1 fix that backfills PostalCode from the registry Postcode column for
+    # simple_short/simple_long titles). Before this fix, kept rows were
+    # carried forward completely untouched, so any cleaning improvement
+    # landing after a row first joined the queue could never reach it -
+    # confirmed against a live queue: 403 pending rows still had PostalCode
+    # NA despite the registry Postcode being present and the F1 backfill
+    # already live in split_addresses.R (2026-07-21 Kirklees audit
+    # follow-up). Take the fresh new_rows version of every column - status
+    # and queue_reason included, since a fixed PostalCode can turn a
+    # not_geocodable row into a geocodable one - except the columns below,
+    # which are real progress/audit state that only run_geocode_batch(),
+    # infer_flat_locations() or assign_flat_groups() itself should change.
+    bookkeeping_cols <- intersect(
+      c("attempts", "last_attempt_date", "flat_group", "flat_rep_key", "flat_check", "flat_group_n"),
+      names(kept_old)
+    )
+    kept <- new_rows[match(kept_old$queue_key, new_rows$queue_key), ]
+    kept[bookkeeping_cols] <- kept_old[bookkeeping_cols]
+
+    pc_changed <- !is.na(kept_old$PostalCode) != !is.na(kept$PostalCode) |
+      (!is.na(kept_old$PostalCode) & !is.na(kept$PostalCode) & kept_old$PostalCode != kept$PostalCode)
+    n_refreshed <- sum(pc_changed, na.rm = TRUE)
+
     to_add <- new_rows[!new_rows$queue_key %in% c(spent$queue_key, kept$queue_key), ]
     combined <- dplyr::bind_rows(spent, kept, to_add)
     message(
       nrow(to_add), " new addresses added to the geocode queue (",
       nrow(spent), " already geocoded, ", nrow(kept), " still queued, ",
+      n_refreshed, " of those picked up a PostalCode change from cleaning fixes, ",
       sum(stale), " stale unsent rows dropped)."
     )
   } else {

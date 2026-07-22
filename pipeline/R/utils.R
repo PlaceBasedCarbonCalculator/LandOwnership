@@ -115,7 +115,27 @@ extract_street_name <- function(address) {
   seg <- stringr::str_extract(address, "^[^,]+")
   has_number <- grepl("^\\s*[0-9]+[A-Za-z]?\\b", seg)
   street <- sub("^\\s*[0-9]+[A-Za-z]?\\b[\\s,]*", "", seg, perl = TRUE)
+
+  # Registry boilerplate describing the numbering, not the street, placed
+  # directly after the house number - "2 (Consecutive numbers) Moorcrest
+  # Road", "211 (exclusive), Old Street" (see the 2026-07-21 Kirklees audit:
+  # this was gluing "(Consecutive numbers)" onto the front of the parsed
+  # street name, so "KIRKLEES|MOORCREST ROAD|7" - sitting right there in
+  # street_lookup from EPC data - could never be keyed to). A real street
+  # name never starts with an opening bracket immediately after the house
+  # number, so this is safe to strip unconditionally.
+  street <- sub("^\\([^()]*\\)\\s*", "", street, perl = TRUE)
   street <- stringr::str_squish(street)
+
+  # Titles that bundle a numbered frontage with adjoining land or a
+  # substation restate the street name two or three times ("Lowedges Road
+  # Lowedges Road and substation Lowedges Road") once the connecting
+  # boilerplate ("land on the north side of", "an electricity") is stripped
+  # elsewhere. Collapse an immediately self-repeating leading phrase back to
+  # one copy so the street key still matches known addresses; an ordinary,
+  # non-repeating street name never matches this pattern and passes through
+  # unchanged.
+  street <- sub("^(.*?)\\s+\\1\\b.*$", "\\1", street, perl = TRUE)
 
   bare_number_seg <- has_number & !is.na(street) & street == ""
   if (any(bare_number_seg)) {
@@ -148,16 +168,62 @@ generic_leading_words <- c(
   "THE SITE", "CAR", "PARKING", "AIRSPACE"
 )
 
+# Building/institution name from a "Ivy Cottage, Ackton Lane" or "Lodge
+# Hotel, 48 Birkby Lodge Road" style leading address segment - the same
+# segment normalise_building_key() keys on, factored out so build_fuzzy_lookup()
+# (fuzzy_match.R) can also index UPRNs by building name, not just street.
+# Returns the ORIGINAL-case text (mirroring extract_street_name()'s
+# contract - callers normalise_name() it themselves), or NA when the
+# leading segment starts with a digit (that's a house number, not a name),
+# is too short to be distinctive, or starts with a generic word
+# (FLAT/UNIT/LAND/... - "Flat 3" is not a building name and would collide
+# across every block at the postcode).
+extract_building_name <- function(address) {
+  seg <- stringr::str_extract(address, "^[^,]+")
+  name_norm <- normalise_name(seg)
+  first_word <- stringr::str_extract(name_norm, "^[A-Z0-9]+")
+  bad <- is.na(name_norm) | nchar(name_norm) < 4 |
+    grepl("^[0-9]", name_norm) |
+    first_word %in% generic_leading_words
+  out <- stringr::str_squish(seg)
+  out[bad] <- NA_character_
+  out
+}
+
+# Road-suffix words used to spot a street name BURIED anywhere inside an
+# address, not just its leading segment - same list R/text_cleaning.R's
+# analyise_text() uses to spot road names generally. Used by
+# extract_buried_street() below (match_free_sources.R's last-resort
+# street-centroid stage) to catch titles like "the paddock north of Foo
+# Street" where positional/legal glue final_address_tidy() didn't fully
+# strip leaves "the paddock" as the leading comma-segment - which is what
+# extract_street_name()/the ordinary street-centroid stages key on - while
+# the real street name, "Foo Street", sits later in the string.
+road_suffix_words <- c(
+  "Road", "Close", "Lane", "Street", "Drive", "Avenue", "Way", "Court",
+  "Place", "Gardens", "Crescent", "Grove", "Hill", "Park", "Terrace",
+  "Green", "Walk", "View", "Mews", "Bridge", "Rise", "Square"
+)
+road_suffix_rx <- paste0(
+  "[A-Z][A-Za-z'-]*(\\s+[A-Z][A-Za-z'-]*){0,4}\\s+(",
+  paste(road_suffix_words, collapse = "|"), ")\\b"
+)
+
+# The LAST "<Capitalised words> <road suffix>" phrase in `address` (NA if
+# none) - positional/legal glue ("land to the rear of", "north of",
+# "adjoining") almost always comes BEFORE the real street name in Land
+# Registry text, essentially never after it, so the last match is the best
+# single guess at the actual street being described.
+extract_buried_street <- function(address) {
+  m <- stringr::str_extract_all(address, road_suffix_rx)
+  vapply(m, function(x) if (length(x) == 0) NA_character_ else x[length(x)], character(1))
+}
+
 normalise_building_key <- function(address, postcode) {
   pc <- normalise_postcode(postcode)
-  seg <- stringr::str_extract(address, "^[^,]+")
-  name <- normalise_name(seg)
-  first_word <- stringr::str_extract(name, "^[A-Z0-9]+")
-  bad <- is.na(name) | nchar(name) < 4 |
-    grepl("^[0-9]", name) |
-    first_word %in% generic_leading_words
+  name <- normalise_name(extract_building_name(address))
   key <- paste(pc, name, sep = "|")
-  key[is.na(pc) | bad] <- NA_character_
+  key[is.na(pc) | is.na(name)] <- NA_character_
   key
 }
 

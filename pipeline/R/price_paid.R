@@ -341,55 +341,86 @@ house_price_extrapolate = function(house_price_lr_uprn, lsoa_admin){
 #' sales to 2022) plus an exact-string match against the EPC registers - so
 #' every transaction since 2022 that isn't an exact EPC address match is
 #' left with no UPRN at all (dropped from `known_uprn_addresses` and
-#' everything built on it). By the time this target runs, the richer
-#' address infrastructure built later in the DAG - `epc_lookup` /
-#' `price_paid_lookup` (looser postcode+house-number keys than the exact
-#' string join), `building_lookup` (named, non-numeric PAONs), `street_lookup`
-#' (known addresses keyed by street), `infill_lookup` (OSM/USRN-inferred
-#' UPRNs) and `postcode_singleton_lookup` - all exist, so a second pass can
-#' recover some of that residual. Reuses match_stage() from
-#' match_free_sources.R, keyed off Price Paid's own structured PAON
-#' (`address1`)/Street (`address3`) columns rather than parsing free text.
-#' `postcode_district` supplies the CCOD/OCOD-style district naming that
-#' `street_lookup`/`infill_lookup` street keys were built with, matching how
-#' `build_street_lookup()` itself derives district from postcode. Used by
-#' the `house_price_lr_rematch` target.
-rematch_price_paid_unmatched = function(house_price_lr_uprn, postcode_district,
-                                        epc_lookup, price_paid_lookup,
-                                        building_lookup = NULL, street_lookup = NULL,
-                                        infill_lookup = NULL, postcode_singleton_lookup = NULL) {
+#' everything built on it). This is Stream 3's matching step (see
+#' _targets.R header): it matches Price Paid's own structured address
+#' columns against `fuzzy_lookup` - the same single, closed Stream-1
+#' address lookup the CCOD/OCOD matching stream matches against
+#' (fuzzy_match.R) - reusing `fuzzy_match_block()` directly rather than
+#' duplicating a second exact-key cascade. A Jaro-Winkler similarity of 1.0
+#' (an exact string match) scores just as well as the old exact-key stages
+#' did; anything down to `min_similarity` also recovers, which the old
+#' exact-only cascade couldn't do at all (a Price Paid "Rd" against a known
+#' "Road" used to fail outright). `postcode_singleton_lookup` is kept as a
+#' small supplementary fallback - it needs no street text at all (NSUL
+#' postcodes with exactly one UPRN), so it catches rows the fuzzy match
+#' structurally can't reach (no parseable house number/street).
+#'
+#' Accepted gap: Price Paid rows whose PAON (`address1`) is a building name
+#' rather than a number (e.g. "Ivy Cottage") have no `house_number_q` and
+#' are skipped - `fuzzy_lookup` itself has the same limitation for
+#' building-name-only known addresses (`extract_street_name()`/building
+#' text isn't indexed by house number), so this isn't a new regression
+#' relative to the CCOD/OCOD fuzzy stage's existing behaviour.
+#'
+#' A postcode-bearing row that finds ZERO candidates at the exact
+#' (postcode, house-number) join used to be a dead end here too - same bug
+#' fixed in fuzzy_match.R's match_fuzzy_sources() after the 2026-07 Kirklees
+#' audit (Land Registry's own postcode text can simply be wrong for a given
+#' house number). Those rows get one more try at the coarser (but weaker)
+#' district block below, same as a postcode-less row.
+#'
+#' Used by the `house_price_lr_rematch` target.
+rematch_price_paid_unmatched = function(house_price_lr_uprn, fuzzy_lookup,
+                                        postcode_singleton_lookup = NULL,
+                                        min_similarity = 0.9, max_block = 500) {
   orig_cols <- names(house_price_lr_uprn)
   rem <- house_price_lr_uprn[is.na(house_price_lr_uprn$uprn), ]
   n_start <- nrow(rem)
-  # postcode_district's key is normalise_postcode()'d (build_postcode_district_lookup()),
-  # unlike Price Paid's raw "AB1 2CD"-with-space postcode column - join on a
-  # normalised copy so the district lookup actually hits.
-  rem$postcode_norm <- normalise_postcode(rem$postcode)
-  rem <- dplyr::left_join(rem, postcode_district, by = c("postcode_norm" = "postcode"))
+  rem$row_id <- seq_len(nrow(rem))
 
-  num_key <- function(df) normalise_match_key(df$address1, df$postcode)
-  bld_key <- function(df) normalise_building_key(df$address1, df$postcode)
-  str_key <- function(df) street_number_key(extract_house_number(df$address1), df$address3, df$district)
+  # Price Paid's own structured schema needs no free-text parsing, unlike
+  # CCOD/OCOD's single AddressLine: address1 (PAON) is usually just the
+  # house number already, address3 is the Street column, and `la` (Local
+  # Authority) stands in for CCOD/OCOD's District for the postcode-less
+  # block.
+  rem$house_number_q <- toupper(extract_house_number(rem$address1))
+  rem$street_q <- normalise_name(rem$address3)
+  rem$postcode_q <- normalise_postcode(rem$postcode)
+  rem$district_q <- normalise_name(rem$la)
+
+  has_text <- !is.na(rem$street_q) & !is.na(rem$house_number_q)
+  has_pc <- has_text & !is.na(rem$postcode_q)
+  has_district_only <- has_text & !has_pc & !is.na(rem$district_q)
+
+  best_pc <- fuzzy_match_block(rem[has_pc, ], fuzzy_lookup, "postcode_q", "postcode", min_similarity, max_block, trust_unique_block = TRUE)
+
+  pc_rows <- rem[has_pc, ]
+  pc_failed <- pc_rows[!pc_rows$row_id %in% best_pc$row_id & !is.na(pc_rows$district_q), ]
+  best_pc_district <- fuzzy_match_block(pc_failed, fuzzy_lookup, "district_q", "district", min_similarity, max_block)
+
+  best_district <- fuzzy_match_block(rem[has_district_only, ], fuzzy_lookup, "district_q", "district", min_similarity, max_block)
+  best <- dplyr::bind_rows(best_pc, best_pc_district, best_district)
 
   matched <- list()
-  run <- function(rem, keys, lookup, quality) {
-    st <- match_stage(rem, keys, lookup, quality)
-    matched[[length(matched) + 1]] <<- st$matched
-    st$remaining
+  if (nrow(best) > 0) {
+    fuzzy_matched <- rem[best$row_id, orig_cols]
+    fuzzy_matched$UPRN <- best$UPRN
+    fuzzy_matched$LATITUDE <- best$LATITUDE
+    fuzzy_matched$LONGITUDE <- best$LONGITUDE
+    fuzzy_matched$match_source <- "fuzzy_lookup"
+    fuzzy_matched$match_quality <- ifelse(best$score >= 0.999, "high", "fuzzy")
+    matched[[length(matched) + 1]] <- fuzzy_matched
+    rem <- rem[-best$row_id, ]
   }
 
-  rem <- run(rem, num_key(rem), epc_lookup, "high")
-  rem <- run(rem, num_key(rem), price_paid_lookup, "high")
-  rem <- run(rem, bld_key(rem), building_lookup, "high")
-  rem <- run(rem, str_key(rem), street_lookup, "medium")
-  rem <- run(rem, num_key(rem), infill_lookup, NA_character_) # quality carried per-row
-  rem <- run(rem, str_key(rem), infill_lookup, NA_character_)
-  rem <- run(rem, normalise_postcode(rem$postcode), postcode_singleton_lookup, "medium")
+  st <- match_stage(rem, normalise_postcode(rem$postcode), postcode_singleton_lookup, "medium")
+  matched[[length(matched) + 1]] <- st$matched
+  rem <- st$remaining
 
   matched <- dplyr::bind_rows(matched)
   # LATITUDE/LONGITUDE are already columns of house_price_lr_uprn (all NA on
-  # these never-matched rows) - match_stage() overwrites them in place, so
-  # only UPRN/match_source/match_quality are genuinely new columns here.
+  # these never-matched rows) - overwritten above/by match_stage(), so only
+  # UPRN/match_source/match_quality are genuinely new columns here.
   extra_cols <- c("UPRN", "match_source", "match_quality")
   for (col in extra_cols[!extra_cols %in% names(matched)]) {
     matched[[col]] <- rep(NA_character_, nrow(matched))
@@ -416,13 +447,17 @@ rematch_price_paid_unmatched = function(house_price_lr_uprn, postcode_district,
 #' `house_price_lr_rematch` only carries the *change* (newly recovered
 #' matches + the residual still without a UPRN). This rebuilds the full
 #' table - every original UBDC/EPC match plus whatever the rematch pass
-#' added - so it can drive a second nowcast/known-address pass in
-#' _targets.R (Stage 6d): `house_prices_nowcast_final`,
-#' `uprn_historical_epc_lr_final`, `known_uprn_addresses_final`, which feed
-#' the published `uprn_all_addresses` table. That second pass can't reuse
-#' the original `known_uprn_addresses`/`street_lookup`/`infill_lookup`
-#' targets - those are inputs to the rematch itself, so feeding the rematch
-#' output back into them would be circular.
+#' added - so it can drive a second nowcast/classification pass in
+#' _targets.R (Stage 6d): `house_prices_nowcast_final` and
+#' `uprn_historical_epc_lr_final`, whose price/domestic-classification
+#' columns then feed the published `uprn_all_addresses` table (Stage 7b).
+#' Deliberately does NOT drive a second `known_uprn_addresses` pass - that
+#' table (Stream 1, see _targets.R header) is closed after one pass and is
+#' itself an input the rematch matches against (via `fuzzy_lookup`), so
+#' feeding rematch's output back into it would be circular; it also
+#' wouldn't add anything a matching consumer doesn't already have, since
+#' every recovered row matched via a key `known_uprn_addresses`/
+#' `uprn_infill` already contained.
 #'
 #' The newly-recovered rows only have a UPRN + coordinates from the rematch
 #' lookups - not the LSOA21CD that `land_registry_add_uprn()` attaches via a

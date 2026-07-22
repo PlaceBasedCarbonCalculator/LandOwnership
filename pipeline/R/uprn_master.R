@@ -23,11 +23,71 @@
 # place downstream projects (e.g. the build repo) look up "what do we know
 # about this UPRN's address".
 
+# The EPC register's own energy-efficiency band column (A-G), found
+# defensively rather than hard-coded: `df` is the raw domestic/non-domestic
+# --- EPC rating extraction --------------------------------------------------
+#
+# The domestic and non-domestic registers do NOT carry comparable ratings,
+# so they are read by explicitly-named column and kept in SEPARATE output
+# columns - never coalesced into one "epc_rating":
+#
+#   domestic     `cur_rate`  an A-G efficiency BAND (ordered factor, with an
+#                            "INVALID!" level for unusable certificates).
+#   non-domestic `rating`    a NUMERIC asset rating (e.g. 49, 56, 45) on a
+#                            different scale entirely - not an A-G band, and
+#                            not convertible to one without asserting band
+#                            thresholds this repo has no authority to set.
+#
+# Both names come from the sibling EPC repo's publication-time rename in
+# EPC/R/merge_epcs.R ("Clean up for publication: rename by name"), which is
+# that repo's deliberate output contract - NOT the raw register's
+# CURRENT_ENERGY_RATING/ASSET_RATING. This was previously read by a
+# pick_epc_rating_col() helper that guessed from a list of candidate names;
+# the list omitted `cur_rate`, so every domestic rating silently came back
+# NA while the non-domestic numeric asset rating matched the bare "rating"
+# candidate - i.e. the published column ended up holding only the values it
+# was least meant to. Reading one named column per register instead means a
+# future rename upstream fails loudly here rather than producing a
+# plausible-looking but empty column. (The rest of this repo already reads
+# the renamed schema - see build_known_uprn_addresses() in uprn_infill.R,
+# which uses `addr`, the renamed ADDRESS1.)
+
+# Domestic A-G band. "INVALID!" is a real level in the source factor for
+# certificates whose rating couldn't be computed - mapped to NA so it never
+# reaches a legend or a colour ramp as if it were a band.
+epc_domestic_rating <- function(df, col = "cur_rate") {
+  if (!col %in% names(df)) {
+    stop(
+      "epc_domestic_rating(): column '", col, "' not found in the domestic EPC ",
+      "data. The sibling EPC repo (EPC/R/merge_epcs.R) may have renamed it - ",
+      "check the published GB_domestic_epc.Rds schema and update this function."
+    )
+  }
+  out <- toupper(trimws(as.character(df[[col]])))
+  out[out %in% c("", "INVALID!", "INVALID", "NA")] <- NA_character_
+  out
+}
+
+# Non-domestic numeric asset rating. Kept numeric (not banded, not coerced
+# to a letter) - see the block comment above.
+epc_nondomestic_asset_rating <- function(df, col = "rating") {
+  if (!col %in% names(df)) {
+    stop(
+      "epc_nondomestic_asset_rating(): column '", col, "' not found in the ",
+      "non-domestic EPC data. The sibling EPC repo (EPC/R/merge_epcs.R) may ",
+      "have renamed it - check the published GB_nondomestic_epc.Rds schema ",
+      "and update this function."
+    )
+  }
+  suppressWarnings(as.numeric(df[[col]]))
+}
+
 build_uprn_all_addresses <- function(uprn_historical, uprn_epc_lr,
                                      dec_addresses, house_price_lr_uprn,
                                      known_uprn_addresses, uprn_infill,
                                      uprn_usrn, usrn_street_names,
-                                     uprn_places, uprn_inspire_lookup) {
+                                     uprn_places, uprn_inspire_lookup,
+                                     house_prices_nowcast_final = NULL) {
   dt <- data.table::as.data.table(
     uprn_historical[, c(
       "UPRN", "date_first", "date_last",
@@ -55,24 +115,33 @@ build_uprn_all_addresses <- function(uprn_historical, uprn_epc_lr,
   dt <- merge(dt, pl, by = "UPRN", all.x = TRUE)
 
   # --- EPC domestic address (rows in the domestic frame that actually have
-  # an EPC record; class-only rows carry NA addr)
+  # an EPC record; class-only rows carry NA addr). epc_dom_rating: the
+  # register's A-G energy-efficiency band, read from the published
+  # `cur_rate` column - see epc_domestic_rating() above for why this is an
+  # explicit named read and why it is NEVER merged with the non-domestic
+  # asset rating.
   dom <- data.table::as.data.table(uprn_epc_lr$domestic)
+  dom$epc_dom_rating <- epc_domestic_rating(dom)
   dom <- dom[!is.na(addr) & addr != "", .(
     UPRN,
     epc_dom_address1 = addr, epc_dom_address2 = ADDRESS2,
     epc_dom_address3 = ADDRESS3, epc_dom_postcode = POSTCODE,
-    epc_dom_year = year
+    epc_dom_year = year, epc_dom_rating
   )]
   dom <- unique(dom, by = "UPRN")
   dt <- merge(dt, dom, by = "UPRN", all.x = TRUE)
 
-  # --- EPC non-domestic address
+  # --- EPC non-domestic address. epc_nondom_asset_rating is a NUMERIC asset
+  # rating on its own scale, deliberately named differently from the
+  # domestic A-G band so the two can never be confused or coalesced
+  # downstream (see the block comment above epc_domestic_rating()).
   nondom <- data.table::as.data.table(uprn_epc_lr$nondomestic)
+  nondom$epc_nondom_asset_rating <- epc_nondomestic_asset_rating(nondom)
   nondom <- nondom[!is.na(adr1) & adr1 != "", .(
     UPRN,
     epc_nondom_address1 = adr1, epc_nondom_address2 = adr2,
     epc_nondom_address3 = adr3, epc_nondom_postcode = postcode,
-    epc_nondom_year = year
+    epc_nondom_year = year, epc_nondom_asset_rating
   )]
   nondom <- unique(nondom, by = "UPRN")
   dt <- merge(dt, nondom, by = "UPRN", all.x = TRUE)
@@ -99,6 +168,28 @@ build_uprn_all_addresses <- function(uprn_historical, uprn_epc_lr,
     "pp_address4", "pp_town", "pp_district", "pp_county", "pp_postcode"
   ))
   dt <- merge(dt, hp, by = "UPRN", all.x = TRUE)
+
+  # --- last sale price + nowcasted 2025 value (optional - house_prices_nowcast_final
+  # is house_price_lr_final's own per-UPRN latest transaction, PLUS
+  # house_price_extrapolate()'s price_2025 column - see the _targets.R
+  # header on Stage 6d. Kept as a separate merge from the Price Paid address
+  # block above rather than pulling `price`/`price_2025` into that same
+  # data.table::as.data.table(house_price_lr_uprn[...]) select() because
+  # house_price_lr_uprn there is deliberately Stage 6d's *_final address
+  # data only - added July 2026 for the pmtiles export (pipeline/R/pmtiles.R)
+  # after finding this table had NO price/value column at all despite
+  # publishing every other price-Paid-derived address field.
+  if (!is.null(house_prices_nowcast_final)) {
+    val <- data.table::as.data.table(
+      house_prices_nowcast_final[!is.na(house_prices_nowcast_final$uprn), c("uprn", "price", "price_2025")]
+    )
+    data.table::setnames(val, c("UPRN", "pp_price", "current_value_2025"))
+    val <- unique(val, by = "UPRN")
+    dt <- merge(dt, val, by = "UPRN", all.x = TRUE)
+  } else {
+    dt$pp_price <- NA_real_
+    dt$current_value_2025 <- NA_real_
+  }
 
   # --- best single address line + parsed house number / street
   kn <- data.table::as.data.table(known_uprn_addresses)[, .(
@@ -149,7 +240,8 @@ build_uprn_all_addresses <- function(uprn_historical, uprn_epc_lr,
   message(
     nrow(dt), " UPRNs in the master address table; ",
     sum(!is.na(dt$best_address)), " with a real address line, ",
-    sum(is.na(dt$best_address) & !is.na(dt$infill_street)), " with only an inferred street."
+    sum(is.na(dt$best_address) & !is.na(dt$infill_street)), " with only an inferred street", ", ",
+    sum(!is.na(dt$current_value_2025)), " with a nowcasted 2025 value."
   )
   as.data.frame(dt)
 }

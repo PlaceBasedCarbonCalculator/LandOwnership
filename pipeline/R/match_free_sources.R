@@ -214,7 +214,8 @@ match_free_sources <- function(needs_geocode, epc_lookup, price_paid_lookup,
                                substation_lookup = NULL,
                                postcode_singleton_lookup = NULL,
                                street_centroid_lookup = NULL,
-                               street_centroid_postcode_lookup = NULL) {
+                               street_centroid_postcode_lookup = NULL,
+                               street_postcode_boundary_lookup = NULL) {
   orig_cols <- names(needs_geocode)
   rem <- needs_geocode
 
@@ -269,11 +270,27 @@ match_free_sources <- function(needs_geocode, epc_lookup, price_paid_lookup,
   rem <- run(rem, normalise_postcode(rem$PostalCode), postcode_singleton_lookup, "medium")
 
   # street-centroid fallbacks: only rows with NO house number (a numbered
-  # address deserves a real geocode, not a street midpoint). Postcode-scoped
-  # is tried first - it's finer-grained and immune to the LR `District`
-  # field occasionally disagreeing with the postal geography (see
-  # build_street_centroid_postcode_lookup()); the district version then
-  # mops up postcode-less rows (nopc_land titles have no postcode at all).
+  # address deserves a real geocode, not a street midpoint). Real postcode-
+  # POLYGON intersections (street_postcode_boundary_lookup - see
+  # pipeline/R/postcode_history.R) are tried first: more precise than the
+  # majority-postcode-string approximation below for a road spanning
+  # several postcodes, and it also covers stale postcode/street
+  # combinations from a retired boundary. The majority-string version then
+  # catches whatever the boundary lookup didn't (e.g. boundary data gaps);
+  # the district version mops up postcode-less rows (nopc_land titles have
+  # no postcode at all).
+  if (!is.null(street_postcode_boundary_lookup) && nrow(street_postcode_boundary_lookup) > 0 && nrow(rem) > 0) {
+    seg <- normalise_name(stringr::str_extract(rem$AddressLine, "^[^,]+"))
+    pckey <- paste(normalise_postcode(rem$PostalCode), seg, sep = "|")
+    pckey[is.na(rem$PostalCode) | is.na(seg)] <- NA_character_
+    pckey[!is.na(extract_house_number(rem$AddressLine))] <- NA_character_
+    cl <- street_postcode_boundary_lookup
+    cl$UPRN <- NA_real_
+    cl$match_source <- "usrn_street_postcode_boundary"
+    st <- match_stage(rem, pckey, cl, "street")
+    matched[[length(matched) + 1]] <- st$matched
+    rem <- st$remaining
+  }
   if (!is.null(street_centroid_postcode_lookup) && nrow(street_centroid_postcode_lookup) > 0 && nrow(rem) > 0) {
     seg <- normalise_name(stringr::str_extract(rem$AddressLine, "^[^,]+"))
     pckey <- paste(normalise_postcode(rem$PostalCode), seg, sep = "|")
@@ -294,6 +311,54 @@ match_free_sources <- function(needs_geocode, epc_lookup, price_paid_lookup,
     cl <- street_centroid_lookup
     cl$UPRN <- NA_real_
     cl$match_source <- "usrn_street_centroid"
+    st <- match_stage(rem, ckey, cl, "street")
+    matched[[length(matched) + 1]] <- st$matched
+    rem <- st$remaining
+  }
+
+  # Last-resort: a street name BURIED after positional/legal text (see
+  # extract_buried_street(), pipeline/R/utils.R) that the ordinary
+  # leading-segment extraction above misses entirely - e.g. "the paddock
+  # north of Foo Street" leaves "the paddock" as AddressLine's leading
+  # comma-segment, not "Foo Street", even though a centroid genuinely
+  # exists for the latter. This is what turns a numberless "land north of
+  # X Road" title into a free, local geocode instead of a paid Azure call -
+  # tried only once every stage above (including the leading-segment
+  # centroid stages) has already failed, using the same three lookups in
+  # the same preference order, so it can never steal a row those already
+  # resolved.
+  if (!is.null(street_postcode_boundary_lookup) && nrow(street_postcode_boundary_lookup) > 0 && nrow(rem) > 0) {
+    buried <- normalise_name(extract_buried_street(rem$AddressLine))
+    pckey <- paste(normalise_postcode(rem$PostalCode), buried, sep = "|")
+    pckey[is.na(rem$PostalCode) | is.na(buried)] <- NA_character_
+    pckey[!is.na(extract_house_number(rem$AddressLine))] <- NA_character_
+    cl <- street_postcode_boundary_lookup
+    cl$UPRN <- NA_real_
+    cl$match_source <- "usrn_street_postcode_boundary_buried"
+    st <- match_stage(rem, pckey, cl, "street")
+    matched[[length(matched) + 1]] <- st$matched
+    rem <- st$remaining
+  }
+  if (!is.null(street_centroid_postcode_lookup) && nrow(street_centroid_postcode_lookup) > 0 && nrow(rem) > 0) {
+    buried <- normalise_name(extract_buried_street(rem$AddressLine))
+    pckey <- paste(normalise_postcode(rem$PostalCode), buried, sep = "|")
+    pckey[is.na(rem$PostalCode) | is.na(buried)] <- NA_character_
+    pckey[!is.na(extract_house_number(rem$AddressLine))] <- NA_character_
+    cl <- street_centroid_postcode_lookup
+    cl$UPRN <- NA_real_
+    cl$match_source <- "usrn_street_centroid_postcode_buried"
+    st <- match_stage(rem, pckey, cl, "street")
+    matched[[length(matched) + 1]] <- st$matched
+    rem <- st$remaining
+  }
+  if (!is.null(street_centroid_lookup) && nrow(street_centroid_lookup) > 0 && nrow(rem) > 0) {
+    buried <- normalise_name(extract_buried_street(rem$AddressLine))
+    ckey <- paste(normalise_name(rem$District), buried, sep = "|")
+    ckey[is.na(rem$District) | is.na(buried)] <- NA_character_
+    ckey[!is.na(extract_house_number(rem$AddressLine))] <- NA_character_
+    cl <- street_centroid_lookup
+    cl$UPRN <- NA_real_
+    cl$match_source <- "usrn_street_centroid_buried"
     st <- match_stage(rem, ckey, cl, "street")
     matched[[length(matched) + 1]] <- st$matched
     rem <- st$remaining
