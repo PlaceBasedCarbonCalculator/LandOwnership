@@ -286,6 +286,69 @@ check(
 )
 cat("geographic fallback: OK\n")
 
+# --- postcode_sector -----------------------------------------------------------
+check("postcode_sector: unit dropped, sector kept", postcode_sector("HD58LU") == "HD58")
+check("postcode_sector: same sector for a changed unit", postcode_sector("HD58LT") == postcode_sector("HD58LU"))
+check("postcode_sector: different sector digit differs", postcode_sector("HD59LU") != postcode_sector("HD58LU"))
+check("postcode_sector: malformed postcode yields NA", is.na(postcode_sector("HD5")))
+cat("postcode_sector: OK\n")
+
+# --- match_postcode_changed: same sector, different unit ---------------------
+# The exact Benomley Crescent pattern, but with NO District text and the old
+# postcode absent from any history lookup - the case that slips past
+# match_fuzzy_sources()'s district AND geographic fallbacks and used to land
+# in the paid queue. Blocking on the shared sector (HD58) recovers it.
+lookup_pc <- data.frame(
+  UPRN = 1001, LATITUDE = 53.64, LONGITUDE = -1.75,
+  street_norm = "BENOMLEY CRESCENT", house_number = "11",
+  postcode = "HD58LT", district = NA_character_,
+  stringsAsFactors = FALSE
+)
+unmatched_pc <- data.frame(
+  `Title Number` = "TP1", AddressLine = "11 Benomley Cresent, Huddersfield",
+  PostalCode = "HD5 8LU", District = NA_character_, # old/wrong unit, no district
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+res_pc <- match_postcode_changed(unmatched_pc, lookup_pc, min_similarity = 0.9)
+check("changed postcode: recovered on shared sector", nrow(res_pc$matched) == 1 && res_pc$matched$UPRN == 1001)
+check("changed postcode: tagged distinct source", res_pc$matched$source == "fuzzy_postcode_changed")
+check("changed postcode: old/new postcode recorded", res_pc$matched$old_postcode == "HD58LU" && res_pc$matched$new_postcode == "HD58LT")
+check("changed postcode: nothing left for the queue", nrow(res_pc$unmatched) == 0)
+
+# A different sector (unit AND sector digit differ) must NOT match - only the
+# unit is allowed to change.
+lookup_pc2 <- data.frame(
+  UPRN = 1002, LATITUDE = 53.64, LONGITUDE = -1.75,
+  street_norm = "BENOMLEY CRESCENT", house_number = "11",
+  postcode = "HD59LT", district = NA_character_, # sector digit differs (8 -> 9)
+  stringsAsFactors = FALSE
+)
+res_pc2 <- match_postcode_changed(unmatched_pc, lookup_pc2, min_similarity = 0.9)
+check("changed postcode: a different sector is not matched", nrow(res_pc2$matched) == 0)
+
+# A candidate with the SAME postcode is not a "changed" match and must be
+# dropped (it should have matched an earlier exact stage, not this one).
+lookup_pc3 <- data.frame(
+  UPRN = 1003, LATITUDE = 53.64, LONGITUDE = -1.75,
+  street_norm = "BENOMLEY CRESCENT", house_number = "11",
+  postcode = "HD58LU", district = NA_character_, # identical to the query postcode
+  stringsAsFactors = FALSE
+)
+res_pc3 <- match_postcode_changed(unmatched_pc, lookup_pc3, min_similarity = 0.9)
+check("changed postcode: same-postcode candidate not flagged as changed", nrow(res_pc3$matched) == 0)
+
+# A dissimilar street in the same sector must still be rejected - the wrong
+# postcode is only forgiven with corroborating street text.
+lookup_pc4 <- data.frame(
+  UPRN = 1004, LATITUDE = 53.64, LONGITUDE = -1.75,
+  street_norm = "COMPLETELY DIFFERENT LANE", house_number = "11",
+  postcode = "HD58LT", district = NA_character_,
+  stringsAsFactors = FALSE
+)
+res_pc4 <- match_postcode_changed(unmatched_pc, lookup_pc4, min_similarity = 0.9)
+check("changed postcode: dissimilar street rejected despite shared sector", nrow(res_pc4$matched) == 0)
+cat("match_postcode_changed: OK\n")
+
 # --- rematch_price_paid_unmatched (Stream 3: Price Paid vs fuzzy_lookup) -----
 fuzzy_lookup_pp <- data.frame(
   UPRN = c(701, 702), LATITUDE = c(53.5, 53.6), LONGITUDE = c(-1.5, -1.6),

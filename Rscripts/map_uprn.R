@@ -32,7 +32,7 @@ point = st_point(point, dim = "XY")
 point = st_sfc(point, crs = 4326)
 point = st_transform(point, 27700)
 
-nn = st_nn(point, uprn_all_addresses, maxdist = 3000, k = nrow(uprn_all_addresses))
+nn = st_nn(point, uprn_all_addresses, maxdist = 5000, k = nrow(uprn_all_addresses))
 
 uprn_sample = uprn_all_addresses[nn[[1]],]
 uprn_sample$UPRN = as.character(uprn_sample$UPRN)
@@ -60,7 +60,6 @@ tm_shape(uprn_sample) +
   fill = "address_status",
   popup.vars = c(
     "UPRN","best_address", "best_postcode", "best_house_number", "best_street",
-    "infill_house_number", "infill_street", "infill_building_name", "infill_postcode",
-    "address_status"
+    "infill_house_number", "infill_street", "infill_building_name", "infill_postcode"
   )
 )

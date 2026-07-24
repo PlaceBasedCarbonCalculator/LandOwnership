@@ -98,6 +98,20 @@ normalise_postcode <- function(postcode) {
   pc
 }
 
+# Postcode SECTOR from an already-normalised (spaceless, uppercase) postcode:
+# everything except the last two characters - the two-letter unit. A UK
+# inward code is always "digit + two letters" (e.g. HD5 "8LU" -> sector
+# "HD58", unit "LU"), so dropping the final two letters keeps the area,
+# district and sector digit intact while discarding only the unit that most
+# often shifts when Land Registry text holds an old/mis-transcribed postcode
+# (see match_postcode_changed(), fuzzy_match.R). Returns NA for anything that
+# doesn't end in the digit+two-letter inward shape, so a malformed or partial
+# postcode never yields a spurious sector to block on.
+postcode_sector <- function(pc) {
+  ok <- !is.na(pc) & nchar(pc) >= 5 & grepl("[0-9][A-Z]{2}$", pc)
+  ifelse(ok, substr(pc, 1, nchar(pc) - 2), NA_character_)
+}
+
 # Leading house-number token: "22", "84A". NA when the address doesn't
 # start with a number.
 extract_house_number <- function(address) {

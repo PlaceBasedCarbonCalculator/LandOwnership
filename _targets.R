@@ -459,6 +459,19 @@ list(
     audit_fuzzy_matches(free_match$unmatched, fuzzy_match)
   ),
 
+  # --- Stage 6g: changed-postcode-unit matching (see match_postcode_changed(),
+  # pipeline/R/fuzzy_match.R) ---
+  # Last stage before the paid queue. Recovers rows whose address text is
+  # clear but whose Land Registry postcode has a stale/mis-transcribed UNIT
+  # (e.g. "11 Benomley Crescent" filed under HD5 8LU when the true UPRN is in
+  # HD5 8LT) - a case the district/geographic fallbacks inside
+  # match_fuzzy_sources() miss when the title has no District text and the old
+  # postcode is retired. Blocks on postcode SECTOR (area+district+sector fixed,
+  # only the unit may differ) + house number, requiring a fuzzy street match.
+  # Tagged source = "fuzzy_postcode_changed" and carries old_postcode/
+  # new_postcode so these are distinguishable from ordinary fuzzy matches.
+  tar_target(postcode_changed_match, match_postcode_changed(fuzzy_match$unmatched, fuzzy_lookup)),
+
   # --- Stage 8: geocode queue (tasks 2/4) ---
   # Nationwide (street name -> how many districts use it) lookup that flags
   # postcode-less, ambiguous-street queue rows for deprioritisation - see
@@ -467,7 +480,7 @@ list(
   tar_target(street_ambiguity_lookup, build_street_ambiguity_lookup(usrn_street_names)),
   tar_target(
     queue_built,
-    build_geocode_queue(fuzzy_match$unmatched, street_ambiguity = street_ambiguity_lookup)
+    build_geocode_queue(postcode_changed_match$unmatched, street_ambiguity = street_ambiguity_lookup)
   ),
   # format = "file": re-reads whenever run_geocode_batch() (run manually,
   # outside this DAG) updates row statuses on disk.
@@ -483,7 +496,7 @@ list(
     final_combined,
     combine_final(
       carry_forward$carried_forward,
-      dplyr::bind_rows(free_match$matched, fuzzy_match$matched),
+      dplyr::bind_rows(free_match$matched, fuzzy_match$matched, postcode_changed_match$matched),
       azure_results,
       queue_current, uprn_historical, uprn_inspire_lookup
     )

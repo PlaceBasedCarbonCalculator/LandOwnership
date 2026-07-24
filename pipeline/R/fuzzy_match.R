@@ -402,3 +402,105 @@ match_fuzzy_sources <- function(unmatched, fuzzy_lookup, postcode_history = NULL
 
   list(matched = matched, unmatched = unmatched_out)
 }
+
+# --- Changed-postcode stage (last resort, after match_fuzzy_sources) ---------
+#
+# A separate, narrower cousin of match_fuzzy_sources()'s postcode block, run
+# on whatever that stage still couldn't match. The queue kept filling with
+# rows whose address text is unambiguous but whose Land Registry postcode is a
+# stale/mis-transcribed UNIT: "11 Benomley Crescent" registered under
+# HD5 8LU when the true UPRN sits in HD5 8LT. The unit (the two trailing
+# letters) is exactly the part of a postcode that shifts over time or gets a
+# character wrong in a title deed; the area, district and sector (HD5 8...)
+# almost never do. match_fuzzy_sources() already has two escape hatches for
+# this - the district block and the geographic (postcode-centroid) fallback -
+# but both need something this row may not have: the district block needs the
+# title's District text to be present AND match a lookup district, and the
+# geographic fallback needs the OLD postcode to still exist in
+# postcode_history with a usable centroid. A postcode-bearing row with no
+# District text whose old postcode has been retired outright slips through
+# both and lands in the paid queue, even though a UPRN with the same house
+# number and (fuzzily) the same street is sitting one unit away in the SAME
+# sector.
+#
+# This stage blocks on (postcode_sector, house_number) - forcing area +
+# district + sector to be identical, so only the unit may differ - then
+# requires the street text to fuzzy-match at `min_similarity`, the same bar
+# every other fuzzy stage uses. trust_unique_block stays FALSE: the whole
+# premise is that the recorded postcode is wrong, so a lone (sector,
+# house-number) candidate is only accepted with corroborating street text,
+# never on the coincidence alone. Matches are tagged source =
+# "fuzzy_postcode_changed" (and carry old_postcode/new_postcode for auditing)
+# so a changed-postcode match is always distinguishable from an ordinary
+# fuzzy one downstream.
+#
+# Kept as its own target/stage rather than folded into match_fuzzy_sources()
+# for the same reason the fuzzy stage is kept out of match_free_sources():
+# the existing cascade is well-tested and this is newer, looser logic that
+# should stay trivially disable-able on its own.
+match_postcode_changed <- function(unmatched, fuzzy_lookup,
+                                    min_similarity = 0.9, max_block = 500) {
+  orig_cols <- names(unmatched)
+  empty <- list(matched = unmatched[0, ], unmatched = unmatched)
+  if (nrow(unmatched) == 0 || nrow(fuzzy_lookup) == 0) {
+    return(empty)
+  }
+
+  rem <- unmatched
+  rem$row_id <- seq_len(nrow(rem))
+  rem$house_number_q <- toupper(extract_house_number(rem$AddressLine))
+  rem$street_q <- normalise_name(extract_street_name(rem$AddressLine))
+  rem$postcode_q <- normalise_postcode(rem$PostalCode)
+  rem$sector_q <- postcode_sector(rem$postcode_q)
+
+  lk <- fuzzy_lookup
+  lk$postcode_sector <- postcode_sector(lk$postcode)
+
+  eligible <- !is.na(rem$street_q) & !is.na(rem$house_number_q) & !is.na(rem$sector_q)
+  best <- fuzzy_match_block(
+    rem[eligible, ], lk[!is.na(lk$postcode_sector), ],
+    "sector_q", "postcode_sector", min_similarity, max_block,
+    trust_unique_block = FALSE
+  )
+  if (nrow(best) == 0) {
+    message("0 of ", nrow(unmatched), " addresses matched on a changed postcode unit.")
+    return(empty)
+  }
+
+  # Attach the matched UPRN's real postcode (the one in the query's sector) so
+  # the match can be reported as old -> new and any coincidental same-postcode
+  # hit (which wouldn't be a "changed" postcode at all, and should have
+  # matched an earlier exact stage) dropped.
+  best <- merge(best, rem[, c("row_id", "postcode_q", "sector_q")], by = "row_id")
+  new_pc <- data.table::as.data.table(lk[!is.na(lk$postcode), c("UPRN", "postcode", "postcode_sector")])
+  new_pc <- unique(new_pc, by = c("UPRN", "postcode_sector"))
+  best <- merge(best, new_pc, by.x = c("UPRN", "sector_q"), by.y = c("UPRN", "postcode_sector"), all.x = TRUE)
+  best <- best[best$postcode != best$postcode_q & !is.na(best$postcode), ]
+  if (nrow(best) == 0) {
+    message("0 of ", nrow(unmatched), " addresses matched on a changed postcode unit.")
+    return(empty)
+  }
+  best <- best[!duplicated(best$row_id), ]
+
+  matched <- unmatched[best$row_id, orig_cols]
+  matched$UPRN <- best$UPRN
+  matched$LATITUDE <- best$LATITUDE
+  matched$LONGITUDE <- best$LONGITUDE
+  matched$source <- "fuzzy_postcode_changed"
+  matched$match_quality <- "fuzzy"
+  matched$fuzzy_score <- round(best$score, 3)
+  matched$fuzzy_block <- "postcode_changed_unit"
+  matched$old_postcode <- best$postcode_q
+  matched$new_postcode <- best$postcode
+
+  unmatched_out <- unmatched[-best$row_id, orig_cols]
+
+  message(
+    nrow(matched), " of ", nrow(unmatched),
+    " addresses matched on a changed postcode unit (", nrow(unmatched_out),
+    " left for the paid queue). Similarity: min=", round(min(matched$fuzzy_score), 3),
+    ", median=", round(stats::median(matched$fuzzy_score), 3), "."
+  )
+
+  list(matched = matched, unmatched = unmatched_out)
+}
