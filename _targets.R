@@ -436,10 +436,8 @@ list(
   tar_target(uprn_all_addresses_coverage, audit_uprn_all_addresses(uprn_all_addresses)),
 
   # Wide-to-narrow attribute table for the UPRN pmtiles export - cheap (a
-  # select()/coalesce() pass), so it's a normal DAG target; actually writing
-  # the GeoJSON/PMTiles (build_uprn_pmtiles(), pipeline/R/pmtiles.R) is a
-  # heavy one-off left for Malcolm to run manually, same convention as Azure
-  # geocoding - see that file's header.
+  # select()/coalesce() pass). The tileset itself is built at the end of this
+  # file; see the "Stage 12" block.
   tar_target(uprn_pmtiles_data, build_uprn_pmtiles_data(uprn_all_addresses)),
 
   # --- Stage 6f: Stream 2 continued - fuzzy free-text matching (last
@@ -500,5 +498,39 @@ list(
       azure_results,
       queue_current, uprn_historical, uprn_inspire_lookup
     )
+  ),
+
+  # --- Stage 12: published tilesets (pipeline/R/pmtiles.R) ---
+  # The three PMTiles layers carbon.place serves from the Land Ownership
+  # Explorer. Nothing depends on them, so they can be built individually with
+  # tar_make(names = ...) - but they ARE targets, not hand-run scripts,
+  # because the previous generation of these tilesets was built by hand and
+  # consequently sat unchanged on the site for four years while the analysis
+  # underneath them was rewritten twice.
+  #
+  # Each writes a multi-GB GeoJSON then runs tippecanoe over it, so budget
+  # hours, not minutes, and expect tens of GB of scratch space under output/.
+  tar_target(
+    inspire_map_data,
+    build_inspire_map_data(inspire_clean, uprn_inspire_lookup, uprn_pmtiles_data)
+  ),
+  tar_target(
+    inspire_pmtiles,
+    build_inspire_pmtiles(inspire_map_data),
+    format = "file"
+  ),
+  tar_target(
+    landowner_pmtiles_data,
+    build_landowner_pmtiles_data(final_combined)
+  ),
+  tar_target(
+    landowner_pmtiles,
+    build_landowner_pmtiles(landowner_pmtiles_data),
+    format = "file"
+  ),
+  tar_target(
+    uprn_pmtiles,
+    build_uprn_pmtiles(uprn_pmtiles_data),
+    format = "file"
   )
 )
