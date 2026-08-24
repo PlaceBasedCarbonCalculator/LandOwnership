@@ -4,12 +4,48 @@
 # instead of two separate hand-run passes, and tagging where each row's
 # location actually came from.
 
+# Blank strings and NA mean the same thing here (readr leaves empty CSV cells
+# as "" in some sources and NA in others); collapse them to NA so downstream
+# tests only have to check one of them.
+blank_to_na <- function(x) {
+  x <- trimws(as.character(x))
+  x[!is.na(x) & x == ""] <- NA_character_
+  x
+}
+
+# Country of registration for the map. OCOD carries an explicit
+# "Country Incorporated (1)"; CCOD has none because every proprietor on it is
+# UK-registered, so prep_ccod.R fills it with "UK" at import. This is the
+# backstop for any row that reaches here without the column anyway (a cached
+# result from an older run, say) - without it, CCOD rows land on the map with
+# an empty country and "UK" never shows up as the most common value.
+resolve_country <- function(df) {
+  country <- if ("Country Incorporated (1)" %in% names(df)) {
+    blank_to_na(df$`Country Incorporated (1)`)
+  } else {
+    rep(NA_character_, nrow(df))
+  }
+  from_uk_dataset <- !is.na(df$dataset) & startsWith(as.character(df$dataset), "ccod")
+  country[is.na(country) & from_uk_dataset] <- "UK"
+  country
+}
+
+# Tenure is the Land Registry's own Freehold/Leasehold flag and is present on
+# both CCOD and OCOD rows, so carry it through rather than re-deriving it
+# downstream from `dataset` - that turned every OCOD title into "Overseas
+# owned", which is not a tenure and hid whether the title was freehold or
+# leasehold. Overseas ownership stays visible via `dataset` and the country.
+resolve_tenure <- function(df) {
+  if ("Tenure" %in% names(df)) blank_to_na(df$Tenure) else rep(NA_character_, nrow(df))
+}
+
 # Common output schema every source gets normalised into before binding.
 normalise_result_columns <- function(df) {
   data.frame(
     title_number = df$`Title Number`,
     dataset = df$dataset,
     category = df$category,
+    tenure = resolve_tenure(df),
     property_address = df$`Property Address`,
     address_line = df$AddressLine,
     district = df$District,
@@ -17,11 +53,7 @@ normalise_result_columns <- function(df) {
     proprietor_name = df$`Proprietor Name (1)`,
     company_registration_no = df$`Company Registration No. (1)`,
     proprietorship_category = df$`Proprietorship Category (1)`,
-    country_incorporated = if ("Country Incorporated (1)" %in% names(df)) {
-      df$`Country Incorporated (1)`
-    } else {
-      NA_character_
-    },
+    country_incorporated = resolve_country(df),
     uprn = as.character(df$uprn),
     latitude = as.numeric(df$latitude),
     longitude = as.numeric(df$longitude),
