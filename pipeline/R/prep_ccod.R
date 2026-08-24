@@ -21,6 +21,28 @@ ccod_columns <- c(
   "Proprietorship Category (1)"
 )
 
+# CCOD carries no "Country Incorporated (1)" column: every proprietor on it is
+# registered in the UK, so the Land Registry only records a country on OCOD,
+# where it varies. Left as-is that asymmetry means ~9 in 10 titles reach the
+# map with an empty country of registration, and "UK" - by far the most common
+# value - never appears at all. Fill it in at import so every downstream
+# consumer sees the same schema for both datasets. The 2022 pipeline did the
+# same thing, but only at the very end (`lr$Country <- "UK"` in
+# R/map_geocoded_data.R), which is why it was lost in the rewrite.
+#
+# Written to tolerate the column appearing in a future CCOD release: a real
+# value is kept, only missing/blank ones become "UK".
+add_ccod_country <- function(lr) {
+  country <- if ("Country Incorporated (1)" %in% names(lr)) {
+    trimws(as.character(lr$`Country Incorporated (1)`))
+  } else {
+    rep(NA_character_, nrow(lr))
+  }
+  country[is.na(country) | country == ""] <- "UK"
+  lr$`Country Incorporated (1)` <- country
+  lr
+}
+
 # Read one CCOD_FULL_*.zip and return the raw rows with a stable key
 # (Title Number) and a stripped-down, by-name column selection.
 import_ccod_raw <- function(zip_path) {
@@ -40,7 +62,8 @@ import_ccod_raw <- function(zip_path) {
     )
   }
 
-  lr <- lr[, ccod_columns]
+  lr <- add_ccod_country(lr)
+  lr <- lr[, c(ccod_columns, "Country Incorporated (1)")]
   lr <- lr[!is.na(lr$`Title Number`), ]
   lr[!duplicated(lr$`Title Number`), ] # CCOD titles are one row each; guard anyway
 }

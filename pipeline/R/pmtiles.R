@@ -427,22 +427,26 @@ build_inspire_pmtiles <- function(inspire_map_data,
 # Attribute table for the landowner point tileset, from final_combined.
 #
 # Field names follow the pre-2026 tileset where the meaning is unchanged
-# (Category, Tenure, Country) so the existing tool keeps working; the columns
-# that replace the old Bing-specific `geocode_type` are new, because the 2026
-# pipeline locates most titles by matching them to a UPRN rather than by
-# geocoding an address string, and "how precise was the geocoder" is no longer
-# the question worth asking. `match_quality` answers the equivalent question -
-# how much to trust this dot - across all the location sources.
+# (Category, Tenure, Country) so the existing tool keeps working. The old
+# Bing-specific `geocode_type` is gone, because the 2026 pipeline locates most
+# titles by matching them to a UPRN rather than by geocoding an address string,
+# and "how precise was the geocoder" is no longer the question worth asking.
+# `match_quality` answers the question that does matter - how much to trust
+# this dot - across all the location sources. Which source located it is
+# deliberately not published: it is a pipeline-internal detail that means
+# nothing to a map reader. `final_combined$source` still records it for
+# auditing.
 build_landowner_pmtiles_data <- function(final_combined) {
   d <- data.table::as.data.table(final_combined)
   d <- d[!is.na(latitude) & !is.na(longitude)]
 
-  tenure <- data.table::fcase(
-    d$dataset == "ccod_freehold", "Freehold",
-    d$dataset == "ccod_leasehold", "Leasehold",
-    d$dataset == "ocod", "Overseas owned",
-    default = "Unknown"
-  )
+  # Tenure is the Land Registry's own Freehold/Leasehold flag, carried through
+  # from the raw CCOD/OCOD rows by combine_results.R. It used to be derived
+  # from `dataset` here, which labelled every OCOD title "Overseas owned" - not
+  # a tenure at all, and it hid whether those titles were freehold or
+  # leasehold. Overseas ownership is still readable from Country.
+  tenure <- as.character(d$tenure)
+  tenure[is.na(tenure) | tenure == ""] <- "Unknown"
 
   out <- data.frame(
     title_number = d$title_number,
@@ -459,7 +463,6 @@ build_landowner_pmtiles_data <- function(final_combined) {
     # which matcher produced the row; a single case means one legend entry
     # instead of two identical ones.
     match_quality = tools::toTitleCase(tolower(as.character(d$match_quality))),
-    match_source = d$source,
     uprn = as.character(d$uprn),
     stringsAsFactors = FALSE
   )
