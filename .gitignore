@@ -59,3 +59,5 @@ _targets/
 data/2026/
 data/geocoding/
 logs/
+*.pmtiles
+*.geojson
